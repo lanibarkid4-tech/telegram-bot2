@@ -35,6 +35,9 @@ const whaleAlert = require('./whale-alert');
 // 2️⃣i IMPORT SIGNAL AGGREGATOR (composite signal dari semua data)
 const signals = require('./signal-aggregator');
 
+// 2️⃣j IMPORT AUTO-SIGNAL WATCHER (auto-fire signal ke Telegram)
+const autoSignal = require('./xauusd-autosignal');
+
 // 3️⃣  AMBIL TOKEN DARI FILE .env
 //     Token ini seperti "password" bot Anda. Jangan share ke orang lain!
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -113,6 +116,10 @@ gracefulShutdown.register('fastbull', () => new Promise((r) => {
   fastbull.stop?.();
   r();
 }));
+gracefulShutdown.register('autosignal', () => new Promise((r) => {
+  autoSignal.stop();
+  r();
+}));
 gracefulShutdown.init();
 
 // === STARTUP TEST: Verifikasi orderflow endpoint bisa diakses ===
@@ -144,6 +151,20 @@ try {
   console.log('✅ [whale-alert] started');
 } catch (e) {
   console.error('❌ [whale-alert] start failed:', e.message);
+}
+
+// Auto-signal watcher: auto-fire XAUUSDT composite signal ke subscriber
+try {
+  // Subscribe chat default owner/admin jika ada di env
+  const defaultChat = process.env.AUTOSIGNAL_CHAT_ID;
+  if (defaultChat) {
+    autoSignal.subscribe(parseInt(defaultChat, 10));
+    console.log(`✅ [autosignal] default subscriber: ${defaultChat}`);
+  }
+  autoSignal.start(bot, (chatId, text) => bot.sendMessage(chatId, text, { parse_mode: 'Markdown' }));
+  console.log('✅ [autosignal] started');
+} catch (e) {
+  console.error('❌ [autosignal] start failed:', e.message);
 }
 
 // === DELAY POLLING START ===
@@ -209,6 +230,13 @@ Saya bot yang siap membantu Anda 24 jam.
 /signal-composite   - Composite signal (tape+book+whale)
 /signal-composite 5m - Per timeframe
 /status            - Bot status & uptime
+
+🚀 AUTO-SIGNAL XAUUSDT (real-time alert):
+/autosignal         - Lihat bantuan auto-signal
+/autosignal on      - Subscribe signal otomatis
+/autosignal off     - Unsubscribe
+/autosignal status  - Status watcher
+/autosignal config  - Lihat konfigurasi
 
 Silakan coba salah satu perintah di atas! 😊
   `;
@@ -1063,6 +1091,189 @@ bot.onText(/^\/status$/, (pesan) => {
   text += `💡 Tips: /help untuk lihat semua command`;
 
   bot.sendMessage(chatId, text, { parse_mode: 'Markdown' });
+});
+
+// ======================================================
+//  🚀 PERINTAH /autosignal - AUTO-SIGNAL WATCHER
+// ======================================================
+//  on|off           → subscribe/unsubscribe chat ini
+//  status           → lihat status watcher
+//  config           → lihat konfigurasi
+//  set <key> <val>  → ubah konfigurasi
+//  test             → trigger signal sekarang (debug)
+//  fire             → paksa kirim signal terakhir
+bot.onText(/^\/autosignal(?:\s+(.+))?$/, async (pesan, match) => {
+  const chatId = pesan.chat.id;
+  const args = (match[1] || '').trim().split(/\s+/).filter(Boolean);
+  const action = args[0] ? args[0].toLowerCase() : '';
+
+  try {
+    // /autosignal on → subscribe
+    if (action === 'on') {
+      autoSignal.subscribe(chatId);
+      const cfg = autoSignal.getConfig();
+      return bot.sendMessage(chatId,
+        `🔔 *AUTO-SIGNAL DIAKTIFKAN*\n\n` +
+        `Anda akan menerima notifikasi otomatis setiap ada signal XAUUSDT:\n` +
+        `  • Timeframe: ${cfg.timeframe}\n` +
+        `  • Min confidence: ${cfg.minConfidence}%\n` +
+        `  • Min severity: ${cfg.minSeverity}\n` +
+        `  • Cooldown: ${cfg.cooldownMs / 1000}s\n` +
+        `  • Cek setiap: ${cfg.checkIntervalMs / 1000}s\n\n` +
+        `Matikan dengan: \`/autosignal off\``,
+        { parse_mode: 'Markdown' }
+      );
+    }
+
+    // /autosignal off → unsubscribe
+    if (action === 'off') {
+      autoSignal.unsubscribe(chatId);
+      return bot.sendMessage(chatId, '🔕 Auto-signal dimatikan untuk chat ini.');
+    }
+
+    // /autosignal status → lihat status
+    if (action === 'status') {
+      const s = autoSignal.getStatus();
+      const isSubscribed = autoSignal.getSubscribers().includes(chatId);
+      const lastSig = s.lastFiredSignal
+        ? `  • ${lastSig.direction} @ ${lastSig.confidence}% (${lastSig.severity})\n  • Fired: ${lastSig.firedAt}`
+        : '  • Belum pernah fire';
+
+      return bot.sendMessage(chatId,
+        `📊 *AUTO-SIGNAL STATUS*\n\n` +
+        `Running: ${s.isRunning ? '✅ YES' : '❌ NO'}\n` +
+        `Uptime: ${s.uptime}\n` +
+        `Subscribers: ${s.subscribers.length} chat\n` +
+        `Your subscription: ${isSubscribed ? '✅ ON' : '❌ OFF'}\n` +
+        `Total signals fired: ${s.totalSignalsFired}\n` +
+        `Next check: ${s.nextCheckIn}\n\n` +
+        `*Last fired signal:*\n${lastSig}\n\n` +
+        `💡 Tip: kirim \`/autosignal on\` untuk subscribe`,
+        { parse_mode: 'Markdown' }
+      );
+    }
+
+    // /autosignal config → lihat konfigurasi
+    if (action === 'config') {
+      const cfg = autoSignal.getConfig();
+      return bot.sendMessage(chatId,
+        `⚙️ *AUTO-SIGNAL CONFIG*\n\n` +
+        `\`enabled\`              = ${cfg.enabled}\n` +
+        `\`timeframe\`            = ${cfg.timeframe}\n` +
+        `\`minConfidence\`        = ${cfg.minConfidence}\n` +
+        `\`minSeverity\`          = ${cfg.minSeverity}\n` +
+        `\`cooldownMs\`           = ${cfg.cooldownMs} (${cfg.cooldownMs / 1000}s)\n` +
+        `\`checkIntervalMs\`      = ${cfg.checkIntervalMs} (${cfg.checkIntervalMs / 1000}s)\n` +
+        `\`requireDirectionChange\` = ${cfg.requireDirectionChange}\n` +
+        `\`includeWhaleAlerts\`   = ${cfg.includeWhaleAlerts}\n` +
+        `\`includeOrderbook\`     = ${cfg.includeOrderbook}\n` +
+        `\`onlyWhenAllAgree\`     = ${cfg.onlyWhenAllAgree}\n\n` +
+        `💡 Ubah dengan: \`/autosignal set <key> <value>\``,
+        { parse_mode: 'Markdown' }
+      );
+    }
+
+    // /autosignal set <key> <value>
+    if (action === 'set' && args.length >= 3) {
+      const key = args[1];
+      const rawVal = args.slice(2).join(' ');
+      const updates = {};
+
+      // Parse value sesuai tipe
+      if (['enabled', 'requireDirectionChange', 'includeWhaleAlerts', 'includeOrderbook', 'onlyWhenAllAgree'].includes(key)) {
+        updates[key] = rawVal === 'true' || rawVal === '1' || rawVal === 'yes';
+      } else if (['minConfidence', 'cooldownMs', 'checkIntervalMs'].includes(key)) {
+        updates[key] = parseInt(rawVal, 10);
+        if (isNaN(updates[key])) {
+          return bot.sendMessage(chatId, `❌ Value untuk ${key} harus angka.`);
+        }
+      } else if (key === 'timeframe') {
+        if (!['1m', '5m', '15m'].includes(rawVal)) {
+          return bot.sendMessage(chatId, `❌ timeframe harus 1m, 5m, atau 15m.`);
+        }
+        updates[key] = rawVal;
+      } else if (key === 'minSeverity') {
+        const upper = rawVal.toUpperCase();
+        if (!['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'].includes(upper)) {
+          return bot.sendMessage(chatId, `❌ minSeverity harus LOW, MEDIUM, HIGH, atau CRITICAL.`);
+        }
+        updates[key] = upper;
+      } else {
+        return bot.sendMessage(chatId, `❌ Unknown key: ${key}`);
+      }
+
+      autoSignal.setConfig(updates);
+      return bot.sendMessage(chatId,
+        `✅ Config updated:\n\`${key}\` = \`${JSON.stringify(updates[key])}\``,
+        { parse_mode: 'Markdown' }
+      );
+    }
+
+    // /autosignal test → cek signal sekarang (tanpa fire)
+    if (action === 'test') {
+      const evalResult = autoSignal._evaluateSignal();
+      if (!evalResult.ready) {
+        return bot.sendMessage(chatId,
+          `🧪 *TEST EVAL*\n\n` +
+          `❌ No signal ready\n` +
+          `Reason: ${evalResult.reason}` +
+          (evalResult.signal ? `\n\nCurrent signal: ${evalResult.signal.direction} (${evalResult.signal.confidence}%, ${evalResult.signal.severity})` : ''),
+          { parse_mode: 'Markdown' }
+        );
+      }
+      const s = evalResult.signal;
+      return bot.sendMessage(chatId,
+        `🧪 *TEST EVAL*\n\n` +
+        `✅ Signal READY to send:\n` +
+        `  • Direction: *${s.direction}*\n` +
+        `  • Confidence: ${s.confidence}%\n` +
+        `  • Severity: ${s.severity}\n` +
+        `  • Score: ${s.score}\n` +
+        `  • Agreement: ${s.agreement}%`,
+        { parse_mode: 'Markdown' }
+      );
+    }
+
+    // /autosignal fire → paksa trigger (skip cooldown, skip direction change)
+    if (action === 'fire') {
+      const beforeStatus = autoSignal.getStatus();
+      autoSignal.triggerNow();
+      const afterStatus = autoSignal.getStatus();
+      if (afterStatus.totalSignalsFired > beforeStatus.totalSignalsFired) {
+        return bot.sendMessage(chatId, '🔥 Signal fired! Cek pesan berikutnya.');
+      }
+      return bot.sendMessage(chatId,
+        `⚠️ Tidak ada signal yang siap fire sekarang.\n` +
+        `Coba \`/autosignal test\` untuk lihat evaluasi.`);
+    }
+
+    // /autosignal (no args) → help
+    return bot.sendMessage(chatId,
+      `🚀 *AUTO-SIGNAL WATCHER*\n\n` +
+      `Auto-fire signal XAUUSDT ke chat ini.\n\n` +
+      `*Commands:*\n` +
+      `  \`/autosignal on\`        Subscribe chat ini\n` +
+      `  \`/autosignal off\`       Unsubscribe\n` +
+      `  \`/autosignal status\`    Lihat status watcher\n` +
+      `  \`/autosignal config\`    Lihat konfigurasi\n` +
+      `  \`/autosignal test\`      Cek apakah ada signal siap\n` +
+      `  \`/autosignal fire\`      Paksa kirim signal\n` +
+      `  \`/autosignal set <k> <v>\` Ubah konfigurasi\n\n` +
+      `*Configurable keys:*\n` +
+      `  • \`timeframe\` (1m/5m/15m)\n` +
+      `  • \`minConfidence\` (0-100)\n` +
+      `  • \`minSeverity\` (LOW/MEDIUM/HIGH/CRITICAL)\n` +
+      `  • \`cooldownMs\` (minimal 60000 = 1 min)\n` +
+      `  • \`checkIntervalMs\` (minimal 30000)\n` +
+      `  • \`enabled\` (true/false)\n` +
+      `  • \`requireDirectionChange\` (true/false)\n\n` +
+      `💡 Contoh: \`/autosignal set minConfidence 75\``,
+      { parse_mode: 'Markdown' }
+    );
+  } catch (e) {
+    console.error('/autosignal error:', e);
+    bot.sendMessage(chatId, `❌ Error: ${e.message}`);
+  }
 });
 
 // ======================================================
