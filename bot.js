@@ -20,6 +20,21 @@ const orderflow = require('./orderflow');
 // 2️⃣d IMPORT MODULE LIQUIDATION WATCHER
 const liquidations = require('./liquidations');
 
+// 2️⃣e IMPORT MODULE TAPE DELTA (buyer/seller aggression per bar)
+const tapeDelta = require('./tape-delta');
+
+// 2️⃣f IMPORT MODULE FASTBULL (news & economic calendar scraper)
+const fastbull = require('./fastbull');
+
+// 2️⃣g IMPORT UTILITIES (cache, rate limiter, logger)
+const { SimpleCache, RateLimiter, Logger, GracefulShutdown, retryWithBackoff } = require('./utils');
+
+// 2️⃣h IMPORT WHALE ALERT (big trades + divergence detection)
+const whaleAlert = require('./whale-alert');
+
+// 2️⃣i IMPORT SIGNAL AGGREGATOR (composite signal dari semua data)
+const signals = require('./signal-aggregator');
+
 // 3️⃣  AMBIL TOKEN DARI FILE .env
 //     Token ini seperti "password" bot Anda. Jangan share ke orang lain!
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -60,7 +75,8 @@ if (!TWELVE_DATA_KEY) {
 
 // 5️⃣  BUAT BOT BARU dengan metode POLLING
 //     Polling = bot cek Telegram secara berkala apakah ada pesan baru
-const bot = new TelegramBot(TOKEN, { polling: true });
+//   Bot instance dibuat tanpa polling dulu (kita start manual setelah delay).
+const bot = new TelegramBot(TOKEN, { polling: false });
 
 // 6️⃣  TAMPILKAN PESAN DI CONSOLE bahwa bot sudah jalan
 console.log('========================================');
@@ -70,8 +86,36 @@ console.log('⏰ Waktu: ' + new Date().toLocaleString());
 console.log('========================================');
 console.log('💡 Tekan CTRL + C untuk mematikan bot');
 
+// ======================================================
+//  SETUP UTILITIES & RATE LIMITERS
+// ======================================================
+const logger = new Logger('[bot]', 'info');
+const commandLimiter = new RateLimiter({
+  '/signal': 5,      // max 5 signal/menit
+  '/tape': 10,       // max 10 tape/menit
+  '/news': 3,        // max 3 news/menit
+  '/calendar': 3,
+  '/whale': 5,
+}, 60);
+
+const gracefulShutdown = new GracefulShutdown();
+
+// Register shutdown handlers
+gracefulShutdown.register('tape-delta', () => new Promise((r) => {
+  tapeDelta.stop?.();
+  r();
+}));
+gracefulShutdown.register('whale-alert', () => new Promise((r) => {
+  whaleAlert.stop?.();
+  r();
+}));
+gracefulShutdown.register('fastbull', () => new Promise((r) => {
+  fastbull.stop?.();
+  r();
+}));
+gracefulShutdown.init();
+
 // === STARTUP TEST: Verifikasi orderflow endpoint bisa diakses ===
-// Ini hanya untuk debugging - akan log ke Railway apakah Binance Futures OK
 (async () => {
   try {
     console.log('🔧 [startup-test] Testing orderflow.getOrderBook(XAUUSDT)...');
@@ -81,6 +125,35 @@ console.log('💡 Tekan CTRL + C untuk mematikan bot');
     console.error(`❌ [startup-test] XAUUSDT FAILED: ${e.message}`);
   }
 })();
+
+// === START BACKGROUND SERVICES ===
+// Tape delta: real-time buyer/seller pressure per bar
+try {
+  tapeDelta.start();
+  console.log('✅ [tape-delta] started');
+} catch (e) {
+  console.error('❌ [tape-delta] start failed:', e.message);
+}
+
+// FastBull: news + economic calendar (cache 5 menit)
+fastbull.start().catch(e => console.error('❌ [fastbull] start failed:', e.message));
+
+// Whale alert: monitor large trades + divergences
+try {
+  whaleAlert.start();
+  console.log('✅ [whale-alert] started');
+} catch (e) {
+  console.error('❌ [whale-alert] start failed:', e.message);
+}
+
+// === DELAY POLLING START ===
+// Tunggu 25 detik untuk pastikan container lama benar-benar mati,
+// sehingga tidak kena 409 Conflict dari Telegram getUpdates.
+console.log('⏳ Waiting 25 detik sebelum mulai polling (avoid 409)...');
+setTimeout(() => {
+  console.log('✓ Memulai Telegram polling sekarang');
+  bot.startPolling().catch(e => console.error('startPolling err:', e.message));
+}, 25000);
 
 // ======================================================
 //  PERINTAH /start
@@ -121,6 +194,21 @@ Saya bot yang siap membantu Anda 24 jam.
 /signal  - Signal EUR/USD
 /signal GBPJPY - Pair tertentu
 /signals - Semua signal
+
+📈 TAPE DELTA (buyer vs seller aggression):
+/tape     - Snapshot tape 1m + CVD + ASCII chart
+/tape 5m  - Snapshot per 5 menit
+/delta    - Detail delta bar aktif
+
+📰 FASTBULL (news & kalender):
+/news     - Top news terbaru
+/calendar - Event ekonomi 24 jam ke depan
+
+🐋 WHALE ALERT & COMPOSITE SIGNAL:
+/whale              - Aktivitas whale terbaru (>$50K)
+/signal-composite   - Composite signal (tape+book+whale)
+/signal-composite 5m - Per timeframe
+/status            - Bot status & uptime
 
 Silakan coba salah satu perintah di atas! 😊
   `;
@@ -163,7 +251,16 @@ Berikut perintah yang bisa Anda gunakan:
 /signal GBPJPY - Signal pair tertentu
 /signals - Ringkasan semua pair
 
-💡 Tips: Cukup kirim pesan biasa (contoh: "halo", "apa kabar"),
+� TAPE DELTA (buyer vs seller aggression):
+/tape     - Snapshot tape 1m + CVD + ASCII chart
+/tape 5m  - Snapshot per 5 menit
+/delta    - Detail delta bar aktif
+
+📰 FASTBULL (news & kalender):
+/news     - Top news terbaru
+/calendar - Event ekonomi 24 jam ke depan
+
+�💡 Tips: Cukup kirim pesan biasa (contoh: "halo", "apa kabar"),
 maka bot akan membalas Anda!
   `;
 
@@ -258,26 +355,117 @@ bot.onText(/\/quote/, (pesan) => {
 
 // /forex atau /signal → signal untuk pair tertentu atau default EURUSD
 // Default mode: SCALPING (bisa override: /signal EURUSD swing, dll)
+// /signal → GABUNGKAN SEMUA DATA untuk sinyal akurat
+// - Forex teknikal (SMA, RSI, support/resistance)
+// - Multi-timeframe confluence
+// - Orderflow real-time (delta, CVD, orderbook imbalance)
+// - Liquidations (whale trades futures)
+// - Fundamental (regime, volatility, bias)
 bot.onText(/^\/(forex|signal)(\s+(\S+))?(\s+(scalping|intraday|swing))?$/i, async (pesan, match) => {
   const chatId = pesan.chat.id;
   const input = match[3] ? match[3].trim().toUpperCase() : 'EURUSD';
-  const mode = match[5] ? match[5].toLowerCase() : 'scalping';  // DEFAULT = scalping
+  const mode = match[5] ? match[5].toLowerCase() : 'scalping';
 
-  // Tampilkan "sedang menganalisa..."
-  const loadingMsg = await bot.sendMessage(chatId, `⚡ Mode ${mode.toUpperCase()} - ${input}\n⏳ Mengambil data + Multi-timeframe analysis...`);
+  const loadingMsg = await bot.sendMessage(chatId,
+    `⚡ *GABUNGAN SINYAL LENGKAP*\n` +
+    `Pair: *${input}* | Mode: *${mode.toUpperCase()}*\n` +
+    `⏳ Mengambil data teknikal + orderflow + CVD + orderbook + liquidations + fundamental...`
+  );
 
-  const result = await forex.getSignalForPair(input, mode);
-  if (result.success) {
-    bot.editMessageText(result.message, {
+  try {
+    // ===== 1. AMBIL SIGNAL TEKNIKAL FOREX (sudah termasuk orderflow) =====
+    const fxResult = await forex.getSignalForPair(input, mode);
+    if (!fxResult.success) {
+      bot.editMessageText(fxResult.message, { chat_id: chatId, message_id: loadingMsg.message_id });
+      return;
+    }
+
+    // ===== 2. AMBIL DATA ORDERBOOK, FLOW, CVD (untuk XAUUSD) =====
+    let obData = null;
+    let flowData = null;
+    let cvdData = null;
+    let liquidData = null;
+    if (input.includes('XAU') || input === 'GOLD') {
+      try {
+        [obData, flowData, cvdData] = await Promise.all([
+          orderflow.getOrderBook('XAUUSDT', 10),
+          orderflow.getAggTrades('XAUUSDT', 500),
+          orderflow.getCVD('XAUUSDT', 60),
+        ]);
+      } catch (e) {
+        console.warn('orderflow data fetch failed:', e.message);
+      }
+      // Liquidations (long-running ws, ambil 5 recent)
+      try {
+        const liqState = liquidations.getState ? liquidations.getState() : null;
+        if (liqState && liqState.recent) liquidData = liqState.recent.slice(0, 5);
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    // ===== 3. GABUNGKAN semua jadi pesan ringkas =====
+    const lines = [];
+    // Ambil forex signal message utama (sudah ada orderflow di dalamnya)
+    lines.push(fxResult.message);
+    lines.push('');
+
+    // Tambahan data mikrostruktur (kalau XAU)
+    if (obData || flowData || cvdData || liquidData) {
+      lines.push('━━━━━━━━━━━━━━━━━━━━');
+      lines.push('📊 *DATA MIKROSTRUKTUR TAMBAHAN (Binance Futures)*');
+      lines.push('');
+
+      if (obData) {
+        lines.push(`📚 *Orderbook Top 10:*`);
+        lines.push(`   Bid: $${obData.bestBid} | Ask: $${obData.bestAsk}`);
+        lines.push(`   Spread: $${obData.spread.toFixed(4)} | Imb: *${obData.imbalance.toFixed(1)}%* ${obData.imbalance > 0 ? '(buyer heavy)' : '(seller heavy)'}`);
+        // Top 3 bids & asks
+        lines.push('   *Top Bids:*');
+        obData.bids.slice(0, 3).forEach(b => {
+          lines.push(`     $${b.price.toFixed(2)} → ${b.qty.toFixed(2)} XAU`);
+        });
+        lines.push('   *Top Asks:*');
+        obData.asks.slice(0, 3).forEach(a => {
+          lines.push(`     $${a.price.toFixed(2)} → ${a.qty.toFixed(2)} XAU`);
+        });
+        lines.push('');
+      }
+
+      if (flowData) {
+        lines.push(`⚡ *Taker Flow (${flowData.totalTrades} trades):*`);
+        lines.push(`   Buy Vol: *${flowData.buyVol.toFixed(1)}* XAU ($${(flowData.buyValue/1000).toFixed(1)}K)`);
+        lines.push(`   Sell Vol: *${flowData.sellVol.toFixed(1)}* XAU ($${(flowData.sellValue/1000).toFixed(1)}K)`);
+        lines.push(`   Delta: *${flowData.delta >= 0 ? '+' : ''}${flowData.delta.toFixed(1)}* XAU`);
+        lines.push(`   Buy/Sell: *${flowData.buyPct.toFixed(1)}%* / *${flowData.sellPct.toFixed(1)}%*`);
+        lines.push('');
+      }
+
+      if (cvdData) {
+        lines.push(`📈 *CVD (${cvdData.windowMinutes}min):*`);
+        lines.push(`   Final: *${cvdData.finalCVD.toFixed(1)}* XAU`);
+        lines.push(`   Trend: *${cvdData.trend}* (${cvdData.buckets} buckets)`);
+        lines.push('');
+      }
+
+      if (liquidData && liquidData.length > 0) {
+        lines.push(`💥 *Liquidations (recent ${liquidData.length}):*`);
+        liquidData.slice(0, 5).forEach(l => {
+          lines.push(`   ${l.side} $${(l.value/1000).toFixed(1)}K @ $${l.price.toFixed(2)}`);
+        });
+        lines.push('');
+      }
+    }
+
+    // Kirim pesan gabungan
+    bot.editMessageText(lines.join('\n'), {
       chat_id: chatId,
       message_id: loadingMsg.message_id,
       parse_mode: 'Markdown'
     });
-  } else {
-    bot.editMessageText(result.message, {
-      chat_id: chatId,
-      message_id: loadingMsg.message_id
-    });
+  } catch (e) {
+    console.error('signal handler error:', e);
+    bot.editMessageText(`❌ Error: ${e.message}`, { chat_id: chatId, message_id: loadingMsg.message_id });
   }
 });
 
@@ -689,6 +877,192 @@ liquidations.connectLiquidationStream((trade) => {
       console.error('Failed send alert to', chatId, e.message);
     });
   }
+});
+
+// ======================================================
+//  PERINTAH /tape - TAPE DELTA SNAPSHOT
+// ======================================================
+//  Format: /tape         -> 1m default
+//          /tape 5m      -> 5m
+//          /tape 15m     -> 15m
+bot.onText(/^\/tape(?: (1m|5m|15m))?$/, async (pesan, match) => {
+  const chatId = pesan.chat.id;
+  const tf = match[1] || '1m';
+
+  try {
+    const text = tapeDelta.formatTapeMessage(tf);
+    // Telegram max 4096 chars; ASCII chart bisa panjang. Split kalau perlu.
+    if (text.length <= 4000) {
+      await bot.sendMessage(chatId, text, { parse_mode: 'Markdown' });
+    } else {
+      // Split: kirim header (Markdown) + chart sebagai plain text
+      const parts = text.split('```');
+      // parts[0] = header markdown, parts[1] = chart code, parts[2] = footer markdown
+      if (parts.length >= 3) {
+        await bot.sendMessage(chatId, parts[0], { parse_mode: 'Markdown' });
+        await bot.sendMessage(chatId, '```\n' + parts[1] + '\n```');
+        if (parts[2] && parts[2].trim()) {
+          await bot.sendMessage(chatId, parts[2], { parse_mode: 'Markdown' });
+        }
+      } else {
+        await bot.sendMessage(chatId, text.slice(0, 4000));
+      }
+    }
+  } catch (e) {
+    console.error('/tape error:', e.message);
+    bot.sendMessage(chatId, `❌ /tape error: ${e.message}`);
+  }
+});
+
+// ======================================================
+//  PERINTAH /delta - DETAIL DELTA BAR AKTIF
+// ======================================================
+bot.onText(/^\/delta(?: (1m|5m|15m))?$/, (pesan, match) => {
+  const chatId = pesan.chat.id;
+  const tf = match[1] || '1m';
+
+  const bar = tapeDelta.getLatestBar(tf);
+  if (!bar) {
+    return bot.sendMessage(chatId, `⏳ Belum ada data bar ${tf}. Tunggu beberapa detik...`);
+  }
+  const cvd = tapeDelta.getCVD(tf, 20);
+  const side = bar.delta >= 0 ? '🟢 BUY pressure' : '🔴 SELL pressure';
+  const text = `📊 *DELTA BAR* ${tapeDelta.SYMBOL} (${tf})\n\n` +
+    `🕐 Bar start: \`${new Date(bar.start).toISOString().substr(11, 19)} UTC\`\n` +
+    `💰 OHLC: \`${bar.open.toFixed(2)} / ${bar.high.toFixed(2)} / ${bar.low.toFixed(2)} / ${bar.close.toFixed(2)}\`\n` +
+    `📈 Buy vol:  \`${bar.buyVol.toFixed(2)}\` (${bar.buyCount} trades)\n` +
+    `📉 Sell vol: \`${bar.sellVol.toFixed(2)}\` (${bar.sellCount} trades)\n` +
+    `⚖️  Delta:   \`${bar.delta >= 0 ? '+' : ''}${bar.delta.toFixed(2)}\`\n` +
+    `📊 CVD (20): \`${cvd.last >= 0 ? '+' : ''}${cvd.last.toFixed(2)}\`\n` +
+    `🎯 Pressure: ${side}`;
+
+  bot.sendMessage(chatId, text, { parse_mode: 'Markdown' });
+});
+
+// ======================================================
+//  PERINTAH /news - FASTBULL TOP NEWS
+// ======================================================
+bot.onText(/^\/news$/, async (pesan) => {
+  const chatId = pesan.chat.id;
+  const loading = await bot.sendMessage(chatId, '⏳ Mengambil news dari FastBull...');
+  try {
+    const items = await fastbull.getNews(8);
+    const text = fastbull.formatNewsMessage(items, 8);
+    await bot.editMessageText(text, {
+      chat_id: chatId,
+      message_id: loading.message_id,
+      parse_mode: 'Markdown',
+      disable_web_page_preview: true,
+    });
+  } catch (e) {
+    console.error('/news error:', e.message);
+    await bot.editMessageText(`❌ /news error: ${e.message}`, {
+      chat_id: chatId,
+      message_id: loading.message_id,
+    });
+  }
+});
+
+// ======================================================
+//  PERINTAH /calendar - FASTBULL ECONOMIC CALENDAR
+// ======================================================
+bot.onText(/^\/calendar$/, async (pesan) => {
+  const chatId = pesan.chat.id;
+  const loading = await bot.sendMessage(chatId, '⏳ Mengambil kalender ekonomi dari FastBull...');
+  try {
+    const items = await fastbull.getCalendar(24);
+    const text = fastbull.formatCalendarMessage(items, 24);
+    await bot.editMessageText(text, {
+      chat_id: chatId,
+      message_id: loading.message_id,
+      parse_mode: 'Markdown',
+    });
+  } catch (e) {
+    console.error('/calendar error:', e.message);
+    await bot.editMessageText(`❌ /calendar error: ${e.message}`, {
+      chat_id: chatId,
+      message_id: loading.message_id,
+    });
+  }
+});
+
+// ======================================================
+//  PERINTAH /whale - WHALE ACTIVITY MONITOR
+// ======================================================
+bot.onText(/^\/whale$/, (pesan) => {
+  const chatId = pesan.chat.id;
+
+  if (!commandLimiter.checkLimit('/whale')) {
+    return bot.sendMessage(chatId, `⏱️ Rate limit /whale. Remaining: ${commandLimiter.getRemainingCalls('/whale')} calls/min`);
+  }
+
+  try {
+    const alerts = whaleAlert.getLatestAlerts(5);
+    if (!alerts || !alerts.length) {
+      return bot.sendMessage(chatId, `🐋 *WHALE ALERT*\n\n⏳ Tidak ada aktivitas whale saat ini.`);
+    }
+
+    let text = `🐋 *WHALE ALERTS* (top ${alerts.length}):\n\n`;
+    for (const alert of alerts) {
+      text += whaleAlert.formatAlertMessage(alert) + '\n\n';
+    }
+    bot.sendMessage(chatId, text, { parse_mode: 'Markdown' });
+  } catch (e) {
+    logger.error('/whale error', e.message);
+    bot.sendMessage(chatId, `❌ /whale error: ${e.message}`);
+  }
+});
+
+// ======================================================
+//  PERINTAH /signal-composite - COMPOSITE SIGNAL
+// ======================================================
+bot.onText(/^\/signal-composite(?: (1m|5m|15m))?$/, (pesan, match) => {
+  const chatId = pesan.chat.id;
+  const tf = match[1] || '1m';
+
+  if (!commandLimiter.checkLimit('/signal')) {
+    return bot.sendMessage(chatId, `⏱️ Rate limit /signal. Remaining: ${commandLimiter.getRemainingCalls('/signal')} calls/min`);
+  }
+
+  try {
+    const signal = signals.getCompositeSignal(tf);
+    const text = signals.formatSignalMessage(signal);
+    bot.sendMessage(chatId, text, { parse_mode: 'Markdown' });
+  } catch (e) {
+    logger.error('/signal-composite error', e.message);
+    bot.sendMessage(chatId, `❌ /signal-composite error: ${e.message}`);
+  }
+});
+
+// ======================================================
+//  PERINTAH /status - BOT STATUS & STATS
+// ======================================================
+bot.onText(/^\/status$/, (pesan) => {
+  const chatId = pesan.chat.id;
+
+  const uptime = Math.floor((Date.now() - (stats.startedAt || Date.now())) / 1000);
+  const hours = Math.floor(uptime / 3600);
+  const minutes = Math.floor((uptime % 3600) / 60);
+  const seconds = uptime % 60;
+
+  const tapeDeltaSnap = tapeDelta.getSnapshot('1m', 5);
+  const whaleAlerts = whaleAlert.getLatestAlerts ? whaleAlert.getLatestAlerts(3) : [];
+
+  let text = `🤖 *BOT STATUS*\n\n`;
+  text += `⏱️ Uptime: ${hours}h ${minutes}m ${seconds}s\n`;
+  text += `📊 Tape Delta Bars (1m): ${tapeDeltaSnap.bars.length}\n`;
+  text += `🐋 Whale Alerts: ${whaleAlerts.length}\n`;
+  text += `📰 News Cache: ${fastbull.CACHE_TTL_MS / 1000}s TTL\n\n`;
+
+  text += `✅ Services Running:\n`;
+  text += `  ✓ Tape Delta (aggTrade)\n`;
+  text += `  ✓ Whale Alert Monitor\n`;
+  text += `  ✓ FastBull News/Calendar\n`;
+  text += `  ✓ Signal Aggregator\n\n`;
+
+  text += `💡 Tips: /help untuk lihat semua command`;
+
+  bot.sendMessage(chatId, text, { parse_mode: 'Markdown' });
 });
 
 // ======================================================

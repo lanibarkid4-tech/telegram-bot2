@@ -39,6 +39,11 @@ const HOSTS = {
   ]
 };
 
+// Bybit public REST endpoints (backup kalau Binance region-restricted)
+const BYBIT_HOST = 'api.bybit.com';
+// Bybit V5 unified trading symbols: XAUUSDT di linear (USDT perp)
+const BYBIT_SYMBOL = 'XAUUSDT';
+
 // Symbol default
 const SYMBOL = 'XAUUSDT';
 
@@ -90,7 +95,99 @@ async function fetchWithFallback(type, path, timeoutMs = 6000) {
       lastErr = e;
     }
   }
+  // fallback ke Bybit kalau Binance gagal semua (hanya untuk linear/futures)
+  if (type === 'fapi') {
+    try {
+      console.log(`↪️ [orderflow] Binance fapi semua gagal, mencoba Bybit fallback...`);
+      const bybitPath = mapBinancePathToBybit(path);
+      if (bybitPath) {
+        const result = await httpsGet(BYBIT_HOST, bybitPath, timeoutMs);
+        const norm = normalizeBybit(result, path);
+        console.log(`✓ [orderflow] Bybit ${BYBIT_HOST}${bybitPath.split('?')[0]}: OK`);
+        return norm;
+      }
+    } catch (e) {
+      console.warn(`⚠️ [orderflow] Bybit fallback juga gagal: ${e.message}`);
+      lastErr = e;
+    }
+  }
   throw lastErr || new Error(`All ${type} hosts failed for ${path}`);
+}
+
+// Mapping path Binance -> Bybit V5 (linear=XAUUSDT futures)
+function mapBinancePathToBybit(path) {
+  // /fapi/v1/depth?symbol=XAUUSDT&limit=20 -> /v5/market/orderbook?category=linear&symbol=XAUUSDT&limit=20
+  if (path.startsWith('/fapi/v1/depth')) {
+    const sp = new URLSearchParams(path.split('?')[1] || '');
+    sp.set('category', 'linear');
+    return `/v5/market/orderbook?${sp.toString()}`;
+  }
+  // /fapi/v1/aggTrades?symbol=XAUUSDT&limit=500 -> /v5/market/recent-trade?category=linear&symbol=XAUUSDT&limit=500
+  if (path.startsWith('/fapi/v1/aggTrades')) {
+    const sp = new URLSearchParams(path.split('?')[1] || '');
+    sp.set('category', 'linear');
+    // Bybit limit max 1000, default 500
+    if (!sp.get('limit')) sp.set('limit', '500');
+    return `/v5/market/recent-trade?${sp.toString()}`;
+  }
+  // /fapi/v1/ticker/24hr -> /v5/market/tickers?category=linear&symbol=XAUUSDT
+  if (path.startsWith('/fapi/v1/ticker/24hr')) {
+    const sp = new URLSearchParams(path.split('?')[1] || '');
+    sp.set('category', 'linear');
+    return `/v5/market/tickers?${sp.toString()}`;
+  }
+  // /fapi/v1/openInterest -> /v5/market/open-interest?category=linear&symbol=XAUUSDT&intervalTime=5min
+  if (path.startsWith('/fapi/v1/openInterest')) {
+    const sp = new URLSearchParams(path.split('?')[1] || '');
+    sp.set('category', 'linear');
+    sp.set('intervalTime', '5min');
+    return `/v5/market/open-interest?${sp.toString()}`;
+  }
+  return null; // tidak didukung
+}
+
+// Normalisasi response Bybit -> mirip format Binance
+function normalizeBybit(bybit, originalPath) {
+  if (!bybit || bybit.retCode !== 0) {
+    throw new Error(`Bybit error: ${bybit?.retMsg || 'unknown'}`);
+  }
+  const r = bybit.result;
+  // /depth
+  if (originalPath.startsWith('/fapi/v1/depth')) {
+    return { bids: r.b, asks: r.a };
+  }
+  // /aggTrades
+  if (originalPath.startsWith('/fapi/v1/aggTrades')) {
+    // Bybit recent-trade: {list: [{execId, symbol, price, qty, side, time}]}
+    // Binance aggTrades: [{a, p, q, T, m, ...}]  m=true = buyer is maker, false = taker is buyer
+    return (r.list || []).map((t) => ({
+      a: t.execId,
+      p: t.price,
+      q: t.qty,
+      T: parseInt(t.time),
+      // Bybit side 'Buy' = taker buy. Untuk Binance m: false berarti taker is buyer.
+      m: t.side !== 'Buy',
+    }));
+  }
+  // /ticker/24hr
+  if (originalPath.startsWith('/fapi/v1/ticker/24hr')) {
+    const x = (r.list && r.list[0]) || {};
+    return {
+      lastPrice: x.lastPrice,
+      priceChangePercent: x.price24hPcnt ? (parseFloat(x.price24hPcnt) * 100).toString() : '0',
+      highPrice: x.highPrice24h,
+      lowPrice: x.lowPrice24h,
+      volume: x.volume24h,
+      quoteVolume: x.turnover24h,
+      count: x.trades24h ? String(parseInt(x.trades24h)) : '0',
+    };
+  }
+  // /openInterest -> Bybit return object with list[{openInterest, ...}]
+  if (originalPath.startsWith('/fapi/v1/openInterest')) {
+    const x = (r.list && r.list[0]) || {};
+    return { openInterest: x.openInterest, time: x.timestamp };
+  }
+  return r;
 }
 
 // ======================================================
