@@ -686,6 +686,7 @@ async function getOrderflowConfirmation(technicalSignal) {
     // Cek konfirmasi / kontradiksi dengan signal teknikal
     let status = 'NONE';
     let adjustment = 0; // perubahan probability (-25 sampai +20)
+    let signalInvalidated = false; // true = signal dibatalkan (jangan entry)
 
     if (technicalSignal === 'BUY') {
       if (orderflowBias === 'BULLISH') {
@@ -693,7 +694,13 @@ async function getOrderflowConfirmation(technicalSignal) {
         adjustment = Math.round(orderflowStrength / 5); // +0 sampai +20
       } else if (orderflowBias === 'BEARISH') {
         status = 'CONFLICT';
-        adjustment = -20; // penalty besar
+        // Konflik KUAT (orderflow strength >= 50) = signal invalid, jangan entry
+        if (orderflowStrength >= 50) {
+          signalInvalidated = true;
+          adjustment = -30; // drop ke <= 20%
+        } else {
+          adjustment = -15; // konflik lemah, tetap tampil tapi hati-hati
+        }
       } else {
         status = 'NEUTRAL';
       }
@@ -703,7 +710,12 @@ async function getOrderflowConfirmation(technicalSignal) {
         adjustment = Math.round(orderflowStrength / 5);
       } else if (orderflowBias === 'BULLISH') {
         status = 'CONFLICT';
-        adjustment = -20;
+        if (orderflowStrength >= 50) {
+          signalInvalidated = true;
+          adjustment = -30;
+        } else {
+          adjustment = -15;
+        }
       } else {
         status = 'NEUTRAL';
       }
@@ -739,6 +751,7 @@ async function getOrderflowConfirmation(technicalSignal) {
       bestAsk: snap.orderbook.bestAsk,
       spread: snap.orderbook.spread,
       adjustment,
+      signalInvalidated,
       timestamp: snap.timestamp,
     };
   } catch (err) {
@@ -824,6 +837,12 @@ function formatSignalMessage(pair, analysis, fundamental, zones, probability, mo
       const adjEmoji = orderflowConf.adjustment > 0 ? '⬆️' : '⬇️';
       lines.push(`   ${adjEmoji} Probability adjustment: *${orderflowConf.adjustment > 0 ? '+' : ''}${orderflowConf.adjustment}%*`);
     }
+    if (orderflowConf.signalInvalidated) {
+      lines.push('');
+      lines.push(`   🚫 *SIGNAL DIBATALKAN!*`);
+      lines.push(`   Orderflow ${orderflowConf.bias} (${orderflowConf.strength}%) BERTENTANGAN dengan signal teknikal ${analysis.signal}.`);
+      lines.push(`   _Disarankan: TUNGGU konfirmasi atau cari pair lain._`);
+    }
     lines.push('');
   } else if (orderflowConf && !orderflowConf.available) {
     lines.push(`🔥 *ORDERFLOW:* ➖ Tidak tersedia (${orderflowConf.error ? orderflowConf.error.slice(0, 50) : 'Binance region-restricted'})`);
@@ -853,7 +872,10 @@ function formatSignalMessage(pair, analysis, fundamental, zones, probability, mo
   }
 
   // === ZONE ENTRY / SL / TP ===
-  if (zones && analysis.signal !== 'NETRAL') {
+  // Skip zona trading kalau signal di-invalidate oleh orderflow conflict kuat
+  const showZones = zones && analysis.signal !== 'NETRAL' &&
+                    !(orderflowConf && orderflowConf.signalInvalidated);
+  if (showZones) {
     lines.push(`🎯 *ZONE TRADING (SL 50 pips, TP 100 pips R:R 1:2):*`);
     lines.push(`📍 *Entry:*`);
     lines.push(`   • Ideal: \`${zones.entry.ideal}\``);
@@ -1086,8 +1108,16 @@ async function getSignalForPair(symbolInput, mode = 'intraday') {
     if (orderflowConf && orderflowConf.available && orderflowConf.adjustment) {
       const oldProb = probability;
       probability = Math.max(5, Math.min(95, probability + orderflowConf.adjustment));
-      console.log(`✓ Orderflow adj: ${oldProb}% → ${probability}% (Δ${orderflowConf.adjustment}%, bias=${orderflowConf.bias}, status=${orderflowConf.status})`);
+      console.log(`✓ Orderflow adj: ${oldProb}% → ${probability}% (Δ${orderflowConf.adjustment}%, bias=${orderflowConf.bias}, status=${orderflowConf.status}, invalidated=${orderflowConf.signalInvalidated})`);
     }
+  }
+
+  // === FILTER KONFLIK KUAT: batalkan zones kalau orderflow BERTENTANGAN ===
+  let activeZones = zones;
+  if (orderflowConf && orderflowConf.signalInvalidated) {
+    activeZones = null; // hide zone trading
+    probability = Math.max(5, Math.min(15, probability)); // cap <= 15% (tidak layak entry)
+    console.log(`🚫 Signal invalidated by orderflow - zones hidden, probability capped at ${probability}%`);
   }
 
   if (mtf && mtf.confluence && mtf.confluence.score >= 80) {
@@ -1104,7 +1134,7 @@ async function getSignalForPair(symbolInput, mode = 'intraday') {
     }
   }
 
-  const message = formatSignalMessage(pair, analysis, fundamental, zones, probability, mode, mtf, m5Confirmation, orderflowConf);
+  const message = formatSignalMessage(pair, analysis, fundamental, activeZones, probability, mode, mtf, m5Confirmation, orderflowConf);
   return { success: true, message };
 }
 
