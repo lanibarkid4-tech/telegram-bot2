@@ -13,12 +13,13 @@
 //  4. Copy API key dari dashboard
 //  5. Set environment variable TWELVE_DATA_API_KEY
 //
-//  PAIR YANG DIDUKUNG (20 total):
-//  Major : EURUSD, GBPUSD, USDJPY, USDCHF, AUDUSD, USDCAD, NZDUSD
-//  Cross : EURJPY, GBPJPY, EURGBP, AUDJPY, EURCHF
-//  Exotic: EURSEK, EURNOK, EURPLN, EURTRY, EURHUF, EURCZK,
-//          EURCNY, EURINR, USDMXN, USDSGD, USDHKD, USDZAR,
-//          USDKRW, USDTHB, USDIDR, USDPHP, USDMYR, USDBRL
+//  PAIR YANG DIDUKUNG (30+ total):
+//  Major  : EURUSD, GBPUSD, USDJPY, USDCHF, AUDUSD, USDCAD, NZDUSD
+//  Cross  : EURJPY, GBPJPY, EURGBP, AUDJPY, EURCHF, EURAUD, GBPAUD,
+//           GBPJPY, AUDNZD, CADJPY, CHFJPY, NZDJPY
+//  Metal  : XAUUSD (Gold), XAGUSD (Silver)
+//  Indeks : NASDAQ (US100/QQQ), SPX500 (S&P 500), DJI (Dow Jones)
+//  Crypto : BTCUSD, ETHUSD
 // ======================================================
 
 // Import helper untuk analisa trend (untuk entry timing M3/M5)
@@ -64,14 +65,45 @@ const TRADING_MODES = {
   }
 };
 
-// Daftar pair yang didukung - HANYA 2 PAIR
-// 1. XAU/USD (Gold Spot) - dari Twelve Data
-// 2. NASDAQ (US100 Index ETF - QQQ) - dari Twelve Data
+// Daftar pair yang didukung
+// Sumber: Twelve Data API (satu-satunya sumber data)
+// Format symbol untuk Twelve Data: BASE/QUOTE (mis. EUR/USD) atau ticker khusus (QQQ, SPX, DJI)
 const SUPPORTED_PAIRS = [
-  // Gold Spot XAU/USD
+  // ===== MAJOR PAIRS (7) =====
+  { symbol: 'EURUSD', base: 'EUR', quote: 'USD', display: 'EUR/USD (Euro/Dollar)', source: 'twelvedata' },
+  { symbol: 'GBPUSD', base: 'GBP', quote: 'USD', display: 'GBP/USD (Pound/Dollar)', source: 'twelvedata' },
+  { symbol: 'USDJPY', base: 'USD', quote: 'JPY', display: 'USD/JPY (Dollar/Yen)', source: 'twelvedata' },
+  { symbol: 'USDCHF', base: 'USD', quote: 'CHF', display: 'USD/CHF (Dollar/Swissie)', source: 'twelvedata' },
+  { symbol: 'AUDUSD', base: 'AUD', quote: 'USD', display: 'AUD/USD (Aussie/Dollar)', source: 'twelvedata' },
+  { symbol: 'USDCAD', base: 'USD', quote: 'CAD', display: 'USD/CAD (Dollar/Loonie)', source: 'twelvedata' },
+  { symbol: 'NZDUSD', base: 'NZD', quote: 'USD', display: 'NZD/USD (Kiwi/Dollar)', source: 'twelvedata' },
+
+  // ===== CROSS PAIRS (12) =====
+  { symbol: 'EURJPY', base: 'EUR', quote: 'JPY', display: 'EUR/JPY (Euro/Yen)', source: 'twelvedata' },
+  { symbol: 'GBPJPY', base: 'GBP', quote: 'JPY', display: 'GBP/JPY (Pound/Yen)', source: 'twelvedata' },
+  { symbol: 'EURGBP', base: 'EUR', quote: 'GBP', display: 'EUR/GBP (Euro/Pound)', source: 'twelvedata' },
+  { symbol: 'AUDJPY', base: 'AUD', quote: 'JPY', display: 'AUD/JPY (Aussie/Yen)', source: 'twelvedata' },
+  { symbol: 'EURCHF', base: 'EUR', quote: 'CHF', display: 'EUR/CHF (Euro/Swissie)', source: 'twelvedata' },
+  { symbol: 'EURAUD', base: 'EUR', quote: 'AUD', display: 'EUR/AUD (Euro/Aussie)', source: 'twelvedata' },
+  { symbol: 'GBPAUD', base: 'GBP', quote: 'AUD', display: 'GBP/AUD (Pound/Aussie)', source: 'twelvedata' },
+  { symbol: 'AUDNZD', base: 'AUD', quote: 'NZD', display: 'AUD/NZD (Aussie/Kiwi)', source: 'twelvedata' },
+  { symbol: 'CADJPY', base: 'CAD', quote: 'JPY', display: 'CAD/JPY (Loonie/Yen)', source: 'twelvedata' },
+  { symbol: 'CHFJPY', base: 'CHF', quote: 'JPY', display: 'CHF/JPY (Swissie/Yen)', source: 'twelvedata' },
+  { symbol: 'NZDJPY', base: 'NZD', quote: 'JPY', display: 'NZD/JPY (Kiwi/Yen)', source: 'twelvedata' },
+  { symbol: 'GBPCAD', base: 'GBP', quote: 'CAD', display: 'GBP/CAD (Pound/Loonie)', source: 'twelvedata' },
+
+  // ===== METALS (2) =====
   { symbol: 'XAUUSD', base: 'XAU', quote: 'USD', display: 'XAU/USD (Gold Spot)', source: 'twelvedata' },
-  // NASDAQ-100 Index (via QQQ ETF proxy)
-  { symbol: 'NASDAQ', base: 'QQQ', quote: 'USD', display: 'NASDAQ (US100)', source: 'twelvedata', twelvedataSymbol: 'QQQ' }
+  { symbol: 'XAGUSD', base: 'XAG', quote: 'USD', display: 'XAG/USD (Silver Spot)', source: 'twelvedata' },
+
+  // ===== US INDICES (3) =====
+  { symbol: 'NASDAQ', base: 'QQQ', quote: 'USD', display: 'NASDAQ (US100)', source: 'twelvedata', twelvedataSymbol: 'QQQ' },
+  { symbol: 'SPX500', base: 'SPY', quote: 'USD', display: 'S&P 500 (US500)', source: 'twelvedata', twelvedataSymbol: 'SPY' },
+  { symbol: 'DJI',    base: 'DIA', quote: 'USD', display: 'Dow Jones (US30)',  source: 'twelvedata', twelvedataSymbol: 'DIA' },
+
+  // ===== CRYPTO (2) =====
+  { symbol: 'BTCUSD', base: 'BTC', quote: 'USD', display: 'BTC/USD (Bitcoin)', source: 'twelvedata' },
+  { symbol: 'ETHUSD', base: 'ETH', quote: 'USD', display: 'ETH/USD (Ethereum)', source: 'twelvedata' },
 ];
 
 // Cari object pair dari simbol (case-insensitive, tanpa slash)

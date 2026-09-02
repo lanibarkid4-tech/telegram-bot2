@@ -531,7 +531,7 @@ ${daftar}
 Ketik \`/signal EURUSD\` (atau pair lain)
 Contoh: \`/signal GBPJPY\`
 
-⏰ Data diupdate harian dari Frankfurter API (ECB).
+⏰ Data realtime & historical dari Twelve Data API.
   `;
   bot.sendMessage(chatId, pesanDaftar, { parse_mode: 'Markdown' });
 });
