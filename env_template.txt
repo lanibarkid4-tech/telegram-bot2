@@ -29,6 +29,44 @@ LANGKAH MEMBUAT TWELVE DATA API KEY (10 DETIK):
 4. Copy API key dari dashboard
 5. Paste di file .env
 
+========================================
+FITUR MAKSIMALKAN (Upgrade)
+========================================
+
+Module baru yang sudah terintegrasi:
+
+1. TAPE DELTA (Real-time Momentum)
+   - Monitor buyer/seller pressure per bar (1m/5m/15m)
+   - CVD (Cumulative Volume Delta)
+   - Whale detection (>$50K)
+   Commands: /tape, /tape 5m, /delta
+
+2. WHALE ALERT MONITOR
+   - Large trades >$50K
+   - Divergence patterns (bearish/bullish)
+   - Absorption detection (buyer stepping in)
+   Commands: /whale
+
+3. SIGNAL AGGREGATOR (Composite Signal)
+   - Gabung tape delta + orderbook + whale activity
+   - Confidence score & severity level
+   Commands: /signal-composite, /signal-composite 5m
+
+4. FASTBULL NEWS & CALENDAR
+   - Real-time news scraper
+   - Economic calendar 24 jam ke depan
+   - Cache 5 menit (efficient)
+   Commands: /news, /calendar
+
+5. ADVANCED UTILS
+   - SimpleCache (LRU dengan TTL)
+   - RateLimiter (prevent API throttle)
+   - Logger (structured logging)
+   - GracefulShutdown (clean exit)
+   - retryWithBackoff (exponential backoff)
+
+Baca MAKSIMALKAN.md untuk detail lengkap!
+
 CATATAN TWELVE DATA:
 - GRATIS 800 request/hari, 8 req/menit
 - Support forex, gold (XAU/USD), indeks (IXIC, GSPC, DJI)
