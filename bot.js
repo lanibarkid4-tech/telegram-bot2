@@ -694,8 +694,29 @@ liquidations.connectLiquidationStream((trade) => {
 // ======================================================
 //  ERROR HANDLING
 // ======================================================
+let pollingRestartTimer = null;
 bot.on('polling_error', (error) => {
   console.log('❌ Polling error:', error.message);
+
+  // Auto-restart polling kalau kena 409 Conflict (biasanya karena container lama masih jalan)
+  if (error.message && (error.message.includes('409') || error.message.includes('Conflict'))) {
+    if (pollingRestartTimer) return; // sudah ada timer pending
+    console.log('🔄 Akan restart polling dalam 15 detik...');
+    pollingRestartTimer = setTimeout(() => {
+      pollingRestartTimer = null;
+      try {
+        console.log('🔄 Restarting polling now...');
+        bot.stopPolling().then(() => {
+          setTimeout(() => {
+            bot.startPolling();
+            console.log('✓ Polling restarted');
+          }, 1000);
+        }).catch(e => console.error('stopPolling err:', e.message));
+      } catch (e) {
+        console.error('Restart polling failed:', e.message);
+      }
+    }, 15000);
+  }
 });
 
 process.on('unhandledRejection', (error) => {
