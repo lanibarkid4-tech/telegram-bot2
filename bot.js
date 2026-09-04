@@ -66,39 +66,40 @@ async function getCandles(tf, count = 200) {
 
 // ======================================================
 //  MODE CONFIG: scalping / intraday / swing
-//  Masing-masing punya TF entry, SL/TP pip (XAU: 1 pip = 0.01)
-//  Default mode: intraday
+//  SL FIXED 50 pips dari zona entri (OB/FVG/Premium-Discount)
+//  TP = 3×SL (R:R 1:3)
+//  XAU/USD: 1 pip = 0.01 USD
 // ======================================================
 const MODES = {
   scalping: {
     label: 'SCALPING',
     emoji: '⚡',
     tfs: { bias: '1h', entry: '5m', confirm: '15m' },
-    atrMulSL: 0.6, atrMulTP: 1.0,  // TP = 1.0× ATR, SL = 0.6× ATR (R:R ~1.67)
-    pipsSL: 50, pipsTP: 100,        // 50/100 pips = 0.50/1.00 USD
+    slPipsFromZone: 50,             // SL = 50 pips dari zone (0.50 USD)
+    tpMultiplier: 3,                 // TP = 3×SL = 150 pips (R:R 1:3)
     holdBars: 6,                    // hold ~30 menit (5m × 6)
     timeInTrade: '5-30 menit',
-    bestFor: 'Quick profit, banyak trade, butuh spread kecil'
+    bestFor: 'Quick profit di zone, R:R 1:3'
   },
   intraday: {
     label: 'INTRADAY',
     emoji: '📊',
     tfs: { bias: '4h', entry: '15m', confirm: '1h' },
-    atrMulSL: 1.0, atrMulTP: 2.0,   // R:R 1:2
-    pipsSL: 150, pipsTP: 300,
+    slPipsFromZone: 50,             // SL = 50 pips dari zone
+    tpMultiplier: 3,                 // TP = 3×SL = 150 pips
     holdBars: 16,                   // hold ~4 jam (15m × 16)
     timeInTrade: '1-4 jam',
-    bestFor: 'Hold beberapa jam, swing kecil-menengah'
+    bestFor: 'Hold di zone premium/discount, R:R 1:3'
   },
   swing: {
     label: 'SWING',
     emoji: '📈',
     tfs: { bias: '1day', entry: '1h', confirm: '4h' },
-    atrMulSL: 1.5, atrMulTP: 3.0,   // R:R 1:2
-    pipsSL: 300, pipsTP: 600,
+    slPipsFromZone: 50,             // SL = 50 pips dari zone (zone H4/Daily lebih jauh)
+    tpMultiplier: 3,                 // TP = 3×SL = 150 pips
     holdBars: 24,                   // hold ~24 jam
     timeInTrade: '1-3 hari',
-    bestFor: 'Hold harian, target besar, lebih jarang trade'
+    bestFor: 'Hold dari zone besar, target 1:3'
   }
 };
 let currentMode = 'intraday';
@@ -109,18 +110,57 @@ function getMode(name) {
   return MODES[k] || MODES[currentMode];
 }
 
-// Hitung SL/TP combo: pakai max(ATR multiplier, fixed pips)
-// Ini supaya konsisten baik di market sepi (pakai pips) maupun volatil (pakai ATR)
-function calcSLTP(entry, atr, isBuy, mode) {
-  const slByAtr = atr * mode.atrMulSL;
-  const tpByAtr = atr * mode.atrMulTP;
-  const slByPips = mode.pipsSL * 0.01;  // 1 pip XAU = 0.01
-  const tpByPips = mode.pipsTP * 0.01;
-  const sl = Math.max(slByAtr, slByPips);
-  const tp = Math.max(tpByAtr, tpByPips);
-  return isBuy
-    ? { sl: entry - sl, tp: entry + tp }
-    : { sl: entry + sl, tp: entry - tp };
+// Cari zona entri terbaik (priority: OB > FVG > swing high/low > price sekarang)
+function findEntryZone(ictA, isBuy, currentPrice) {
+  if (isBuy) {
+    // Cari Bullish OB di bawah harga
+    const ob = (ictA.orderBlocks || []).find(o => o.type === 'BULLISH_OB' && o.high < currentPrice);
+    if (ob) return { type: 'BULLISH_OB', price: ob.midpoint, low: ob.low, high: ob.high, strength: ob.strength };
+    // Fallback ke Bullish FVG
+    const fvg = (ictA.fvgs || []).find(f => f.type === 'BULLISH_FVG' && f.high < currentPrice);
+    if (fvg) return { type: 'BULLISH_FVG', price: fvg.midpoint, low: fvg.low, high: fvg.high };
+    // Fallback ke support
+    if (ictA.premiumDiscount) {
+      const pd = ictA.premiumDiscount;
+      // BUY di discount zone (OTE buy)
+      if (pd.zone === 'DISCOUNT') return { type: 'DISCOUNT_OTE', price: pd.oTE_buy, low: pd.swingLow, high: pd.oTE_buy };
+    }
+  } else {
+    // Cari Bearish OB di atas harga
+    const ob = (ictA.orderBlocks || []).find(o => o.type === 'BEARISH_OB' && o.low > currentPrice);
+    if (ob) return { type: 'BEARISH_OB', price: ob.midpoint, low: ob.low, high: ob.high, strength: ob.strength };
+    // Fallback ke Bearish FVG
+    const fvg = (ictA.fvgs || []).find(f => f.type === 'BEARISH_FVG' && f.low > currentPrice);
+    if (fvg) return { type: 'BEARISH_FVG', price: fvg.midpoint, low: fvg.low, high: fvg.high };
+    // Fallback ke premium
+    if (ictA.premiumDiscount) {
+      const pd = ictA.premiumDiscount;
+      if (pd.zone === 'PREMIUM') return { type: 'PREMIUM_OTE', price: pd.oTE_sell, low: pd.oTE_sell, high: pd.swingHigh };
+    }
+  }
+  return null;
+}
+
+// Hitung SL/TP dari zona entri:
+// - SL: 50 pips dari batas zone (low untuk BUY, high untuk SELL)
+// - TP: 3×SL dari entry
+function calcSLTPFromZone(zone, isBuy, mode, currentPrice) {
+  const slDistUSD = mode.slPipsFromZone * 0.01;  // 50 pips = 0.50 USD
+  let entry, sl, zoneBound;
+  if (isBuy) {
+    entry = zone.price;  // masuk di midpoint zone
+    zoneBound = zone.low;  // batas bawah zone
+    // SL = max(zone.low - 50pips, current - 50pips) supaya gak ketarik terlalu jauh
+    sl = Math.min(zoneBound - slDistUSD, entry - slDistUSD);
+  } else {
+    entry = zone.price;
+    zoneBound = zone.high;
+    sl = Math.max(zoneBound + slDistUSD, entry + slDistUSD);
+  }
+  const slDist = Math.abs(entry - sl);
+  const tpDist = slDist * mode.tpMultiplier;
+  const tp = isBuy ? entry + tpDist : entry - tpDist;
+  return { entry, sl, tp, slDist, tpDist };
 }
 
 // ======================================================
@@ -289,11 +329,13 @@ function setMode(m, name) {
   const mode = MODES[name];
   if (!mode) return;
   currentMode = name;
+  const slPips = mode.slPipsFromZone;
+  const tpPips = slPips * mode.tpMultiplier;
   const msg = `${mode.emoji} *MODE: ${mode.label}*\n` +
     `⏱ Hold: ${mode.timeInTrade}\n` +
-    `🛑 SL: ${mode.pipsSL} pips ($${(mode.pipsSL * 0.01).toFixed(2)})\n` +
-    `🎯 TP: ${mode.pipsTP} pips ($${(mode.pipsTP * 0.01).toFixed(2)})\n` +
-    `📏 R:R = 1:${(mode.pipsTP / mode.pipsSL).toFixed(2)}\n` +
+    `🛑 SL: ${slPips} pips dari zone ($${(slPips * 0.01).toFixed(2)})\n` +
+    `🎯 TP: ${tpPips} pips = 3×SL ($${(tpPips * 0.01).toFixed(2)})\n` +
+    `📏 R:R = 1:${mode.tpMultiplier}\n` +
     `📊 TF bias: ${mode.tfs.bias} | entry: ${mode.tfs.entry}\n` +
     `\n_${mode.bestFor}_\n\n` +
     `Ketik /signal untuk analisa dengan mode ini.`;
@@ -305,10 +347,15 @@ bot.onText(/^\/(intra|intraday)$/, (m) => setMode(m, 'intraday'));
 bot.onText(/^\/swing$/, (m) => setMode(m, 'swing'));
 bot.onText(/^\/mode$/, (m) => {
   const m0 = getMode();
+  const slPips = m0.slPipsFromZone;
+  const tpPips = slPips * m0.tpMultiplier;
   bot.sendMessage(m.chat.id,
     `🎯 *MODE AKTIF:* ${m0.emoji} ${m0.label}\n` +
     `⏱ ${m0.timeInTrade}\n` +
-    `📊 SL ${m0.pipsSL} / TP ${m0.pipsTP} pips\n\n` +
+    `📊 SL: ${slPips} pips dari zone ($${(slPips * 0.01).toFixed(2)})\n` +
+    `🎯 TP: ${tpPips} pips ($${(tpPips * 0.01).toFixed(2)})\n` +
+    `📏 R:R = 1:${m0.tpMultiplier}\n` +
+    `📦 TF: bias ${m0.tfs.bias} → entry ${m0.tfs.entry}\n\n` +
     `Ganti: /scalp /intra /swing`,
     { parse_mode: 'Markdown' }
   );
@@ -355,65 +402,64 @@ bot.onText(/^\/(signal|xauusd)$/, async (m) => {
     const emoji = isBuy ? '🟢' : '🔴';
     const dirText = isBuy ? 'BUY' : 'SELL';
     const last = setup.last;
-    const atr = ta.atr;
-    const entry = ta.price;
+    const currentPrice = ta.price;
 
-    // SL/TP sesuai MODE
-    const { sl, tp } = calcSLTP(entry, atr, isBuy, mode);
-    const risk = Math.abs(entry - sl);
-    const reward = Math.abs(tp - entry);
-    const rr = reward / Math.max(0.01, risk);
-    const slPips = Math.round(risk / 0.01);
-    const tpPips = Math.round(reward / 0.01);
+    // Cari zona entri ICT (priority: OB > FVG > OTE Premium/Discount)
+    const zone = findEntryZone(ictA, isBuy, currentPrice);
 
-    // Limit order recommendation
-    // BUY: limit di discount (entry lebih rendah), SL di bawah OB
-    // SELL: limit di premium (entry lebih tinggi), SL di atas OB
-    let limitOrder = '';
-    if (isBuy && setup.inDiscount) {
-      const limitPrice = entry - atr * 0.3;  // 0.3 ATR di bawah current
-      limitOrder = `📥 *LIMIT BUY:* $${fmt(limitPrice)} (di discount)`;
-    } else if (!isBuy && setup.inPremium) {
-      const limitPrice = entry + atr * 0.3;
-      limitOrder = `📥 *LIMIT SELL:* $${fmt(limitPrice)} (di premium)`;
+    let entry, sl, tp, slPips, tpPips, rr;
+    let zoneLabel = '';
+
+    if (zone) {
+      // Hitung SL/TP dari zone (50 pips dari zone, TP 3×SL)
+      const st = calcSLTPFromZone(zone, isBuy, mode, currentPrice);
+      entry = st.entry;
+      sl = st.sl;
+      tp = st.tp;
+      zoneLabel = zone.type;
     } else {
-      limitOrder = `⚡ *MARKET ORDER* (bukan zone ideal)`;
+      // Fallback: pakai current price + 50 pips SL + 3×SL TP
+      const slDistUSD = mode.slPipsFromZone * 0.01;
+      entry = currentPrice;
+      sl = isBuy ? currentPrice - slDistUSD : currentPrice + slDistUSD;
+      const tpDist = slDistUSD * mode.tpMultiplier;
+      tp = isBuy ? currentPrice + tpDist : currentPrice - tpDist;
+      zoneLabel = 'NO_ZONE (use current price)';
     }
 
-    // Cari ICT zone konfirmasi
-    let ictConf = '';
-    if (isBuy) {
-      const ob = (ictA.orderBlocks || []).find(o => o.type === 'BULLISH_OB' && o.midpoint < entry);
-      const fvg = (ictA.fvgs || []).find(f => f.type === 'BULLISH_FVG' && f.midpoint < entry);
-      if (ob) ictConf += `\n🎯 OB: $${fmt(ob.low)} — $${fmt(ob.high)}`;
-      if (fvg) ictConf += `\n🎯 FVG: $${fmt(fvg.low)} — $${fmt(fvg.high)}`;
+    const slDist = Math.abs(entry - sl);
+    const tpDist = Math.abs(tp - entry);
+    slPips = Math.round(slDist / 0.01);
+    tpPips = Math.round(tpDist / 0.01);
+    rr = tpDist / Math.max(0.01, slDist);
+
+    // Limit vs Market
+    let limitOrder = '';
+    const distToEntry = Math.abs(currentPrice - entry);
+    if (distToEntry > 0.5) {
+      // Entry zona jauh dari harga sekarang → LIMIT order
+      limitOrder = `📥 *LIMIT ${dirText}:* $${fmt(entry)} (di ${zoneLabel})`;
     } else {
-      const ob = (ictA.orderBlocks || []).find(o => o.type === 'BEARISH_OB' && o.midpoint > entry);
-      const fvg = (ictA.fvgs || []).find(f => f.type === 'BEARISH_FVG' && f.midpoint > entry);
-      if (ob) ictConf += `\n🎯 OB: $${fmt(ob.low)} — $${fmt(ob.high)}`;
-      if (fvg) ictConf += `\n🎯 FVG: $${fmt(fvg.low)} — $${fmt(fvg.high)}`;
+      // Entry zona dekat / current → MARKET order
+      limitOrder = `⚡ *MARKET ${dirText}:* $${fmt(entry)} (di ${zoneLabel})`;
     }
 
     const lines = [];
     lines.push(`${emoji} *XAU/USD — ${dirText}* (${mode.label})`);
-    lines.push(`💰 Price: *$${fmt(entry)}* | ${mode.emoji} ${mode.timeInTrade}`);
+    lines.push(`💰 Price: *$${fmt(currentPrice)}* | ${mode.emoji} ${mode.timeInTrade}`);
     lines.push(`🎯 Confidence: *${setup.confidence}%*`);
     lines.push(`📊 RSI: ${fmt(ta.indicators.rsi, 1)} | MACD-h: ${fmt(ta.indicators.macd_hist, 3)}`);
     lines.push(`📈 Trend: ${setup.trendDir} | Zone: ${setup.inDiscount ? 'DISCOUNT' : setup.inPremium ? 'PREMIUM' : 'EQ'}`);
     lines.push('');
     lines.push('━━━ ORDER ━━━');
     lines.push(limitOrder);
-    lines.push(`📍 Market Entry: $${fmt(entry)}`);
+    if (zone) lines.push(`📦 Zone: ${zoneLabel} $${fmt(zone.low)} — $${fmt(zone.high)}`);
     lines.push('');
-    lines.push('━━━ PLAN ━━━');
-    lines.push(`🎯 TP: *$${fmt(tp)}* (${tpPips} pips)`);
-    lines.push(`🛑 SL: *$${fmt(sl)}* (${slPips} pips)`);
-    lines.push(`📏 R:R = 1:${fmt(rr, 2)} | ATR: $${fmt(atr)}`);
-    if (ictConf) {
-      lines.push('');
-      lines.push('━━━ ICT ZONE ━━━');
-      lines.push(ictConf.trim());
-    }
+    lines.push('━━━ PLAN (SL 50 pips dari zone) ━━━');
+    lines.push(`📍 Entry: *$${fmt(entry)}*`);
+    lines.push(`🎯 TP: *$${fmt(tp)}* (${tpPips} pips = 3×SL)`);
+    lines.push(`🛑 SL: *$${fmt(sl)}* (${slPips} pips dari zone)`);
+    lines.push(`📏 R:R = 1:${fmt(rr, 2)}`);
     lines.push('');
     lines.push('━━━ ALASAN ━━━');
     setup.reasons.forEach(r => lines.push('• ' + r));
