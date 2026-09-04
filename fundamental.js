@@ -1,90 +1,64 @@
 // ======================================================
-//  📰 MODULE ANALISA FUNDAMENTAL - GRATIS
+//  📰 MODULE ANALISA FUNDAMENTAL (Finnhub only)
 // ======================================================
-//  Mengambil data fundamental dari sumber publik gratis:
-//  - Currency strength (dari pergerakan forex 7 hari)
-//  - DXY proxy (EUR/USD inverse) untuk Gold & Index
+//  Menghitung currency strength dari pergerakan pair forex
+//  utama (EUR/USD, GBP/USD, USD/JPY, AUD/USD, USD/CAD,
+//  USD/CHF, NZD/USD) menggunakan candle D1 dari Finnhub.
+//
+//  Komponen:
+//  - Currency strength (% perubahan relatif antar pair)
+//  - DXY proxy (inverse EUR/USD)
 //  - Market regime detection (trending / ranging)
 //  - Volatility score
 //
 //  Semua berbasis data harga real, bukan asumsi.
 // ======================================================
 
-const https = require('https');
+const candles = require('./candles');
+const { SimpleCache } = require('./utils');
 
-// Helper: fetch JSON dari URL (follow redirect)
-function fetchJson(url, headers = {}, redirectCount = 0) {
-  return new Promise((resolve, reject) => {
-    const req = https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0', ...headers } }, (res) => {
-      // Follow redirect (301, 302, 307, 308)
-      if ([301, 302, 307, 308].includes(res.statusCode) && res.headers.location && redirectCount < 3) {
-        const newUrl = new URL(res.headers.location, url).toString();
-        resolve(fetchJson(newUrl, headers, redirectCount + 1));
-        return;
-      }
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => {
-        try {
-          resolve(JSON.parse(data));
-        } catch (e) {
-          reject(new Error('JSON parse error: ' + data.substring(0, 50)));
-        }
-      });
-    });
-    req.on('error', reject);
-    req.setTimeout(10000, () => { req.destroy(); reject(new Error('Timeout')); });
-  });
-}
+const strengthCache = new SimpleCache(3600, 5); // 1 jam
 
-// Hitung kekuatan mata uang berdasarkan perubahan D1 (14 hari terakhir)
-// Frankfurter hanya kasih D1 - kita pakai window 14 hari supaya representatif
-// untuk analisa fundamental D1 (lebih stabil dari 5 hari / 24 jam)
-async function getCurrencyStrength(pair = null) {
-  try {
-    // Frankfurter timeseries 14 hari (representasi perubahan D1)
-    const endDate = new Date();
-    const startDate = new Date();
-    startDate.setDate(endDate.getDate() - 14);
-    const fmt = d => d.toISOString().split('T')[0];
-    const url = `https://api.frankfurter.app/${fmt(startDate)}..${fmt(endDate)}?from=USD&to=EUR,GBP,JPY,CHF,AUD,CAD,NZD`;
-    const data = await fetchJson(url);
+// Daftar pair untuk hitung currency strength
+const CCY_PAIRS = [
+  { pair: 'EUR/USD', base: 'EUR', quote: 'USD' },
+  { pair: 'GBP/USD', base: 'GBP', quote: 'USD' },
+  { pair: 'USD/JPY', base: 'USD', quote: 'JPY' },
+  { pair: 'AUD/USD', base: 'AUD', quote: 'USD' },
+  { pair: 'USD/CAD', base: 'USD', quote: 'CAD' },
+  { pair: 'USD/CHF', base: 'USD', quote: 'CHF' },
+  { pair: 'NZD/USD', base: 'NZD', quote: 'USD' },
+];
 
-    if (!data.rates) return null;
+// Hitung kekuatan mata uang berdasarkan perubahan D1 (14 candle terakhir)
+async function getCurrencyStrength() {
+  const cached = strengthCache.get('ccy_strength');
+  if (cached) return cached;
 
-    // Hitung % perubahan setiap mata uang terhadap USD
-    const dates = Object.keys(data.rates).sort();
-    if (dates.length < 2) return null;
-    const first = data.rates[dates[0]];
-    const last = data.rates[dates[dates.length - 1]];
+  const strength = {
+    USD: 0, EUR: 0, GBP: 0, JPY: 0, CHF: 0, AUD: 0, CAD: 0, NZD: 0
+  };
 
-    const pctChange = {};
-    for (const ccy of Object.keys(last)) {
-      const oldVal = first[ccy];
-      const newVal = last[ccy];
-      if (oldVal && newVal) {
-        // USD/ccy naik = USD melemah (ccy menguat)
-        pctChange[ccy] = ((newVal - oldVal) / oldVal) * 100;
-      }
+  for (const { pair, base, quote } of CCY_PAIRS) {
+    try {
+      const data = await candles.getCandles(pair, '1day', 14);
+      if (data.length < 2) continue;
+      const first = data[0].close;
+      const last = data[data.length - 1].close;
+      const pct = ((last - first) / first) * 100;
+      // pair naik = base menguat (relatif thd quote)
+      strength[base] += pct;
+      strength[quote] -= pct;
+    } catch (e) {
+      // Skip pair yang gagal, lanjut ke berikutnya
+      continue;
     }
-
-    // Map currency strength (positif = menguat, negatif = melemah)
-    const strength = {
-      USD: 0,
-      EUR: pctChange.EUR ? -pctChange.EUR : 0,
-      GBP: pctChange.GBP ? -pctChange.GBP : 0,
-      JPY: pctChange.JPY ? -pctChange.JPY : 0,
-      CHF: pctChange.CHF ? -pctChange.CHF : 0,
-      AUD: pctChange.AUD ? -pctChange.AUD : 0,
-      CAD: pctChange.CAD ? -pctChange.CAD : 0,
-      NZD: pctChange.NZD ? -pctChange.NZD : 0
-    };
-
-    return strength;
-  } catch (err) {
-    console.error('Error currency strength:', err.message);
-    return null;
+    // jeda agar tidak kena rate limit
+    await new Promise(r => setTimeout(r, 200));
   }
+
+  strengthCache.set('ccy_strength', strength);
+  return strength;
 }
 
 // Tentukan market regime (trending atau ranging)
@@ -142,20 +116,22 @@ function calculateVolatility(prices) {
 function getPairCurrencyStrength(pair, strength) {
   if (!strength) return { base: 0, quote: 0 };
 
-  if (pair.source === 'yahoo') {
-    // Untuk index & commodity, "base" dianggap USD proxy
-    // DXY berlawanan dengan EURUSD
-    if (pair.symbol === 'XAUUSD') {
-      // Gold menguat saat USD melemah → pakai inverse USD
-      return { base: 0, quote: -strength.USD * 0.7 };
-    }
-    // Index saham menguat saat risk-on (USD lemah)
-    if (['NASDAQ', 'SPX', 'DJI'].includes(pair.symbol)) {
-      return { base: -strength.USD * 0.5, quote: 0 };
-    }
-    return { base: 0, quote: 0 };
+  const sym = (pair.symbol || '').toUpperCase();
+
+  // Commodity / index → proxy USD inverse
+  if (sym === 'XAU/USD' || sym === 'XAUUSD') {
+    return { base: 0, quote: -strength.USD * 0.7 };
+  }
+  if (['NDX', 'NASDAQ', 'SPX', 'DJI'].includes(sym)) {
+    return { base: -strength.USD * 0.5, quote: 0 };
   }
 
+  // Crypto major (BTC, ETH) → proxy risk-on
+  if (sym.includes('BTC') || sym.includes('ETH')) {
+    return { base: -strength.USD * 0.5, quote: 0 };
+  }
+
+  // Forex pair biasa (EURUSD, USDJPY, dll)
   return {
     base: strength[pair.base] || 0,
     quote: strength[pair.quote] || 0
