@@ -217,7 +217,7 @@ function classifySetup(ta, ictA, h1Candles) {
 // ======================================================
 bot.onText(/^\/(signal|xauusd)$/, async (m) => {
   const cid = m.chat.id;
-  if (!limiter.allow('/signal', cid)) return bot.sendMessage(cid, '⏳ Tunggu...');
+  if (!limiter.checkLimit('/signal')) return bot.sendMessage(cid, '⏳ Tunggu...');
 
   const loading = await bot.sendMessage(cid, '⏳ Generate signal XAU/USD...');
   try {
@@ -312,7 +312,7 @@ bot.onText(/^\/(signal|xauusd)$/, async (m) => {
 // ======================================================
 bot.onText(/^\/(bias|xauusd-bias)$/, async (m) => {
   const cid = m.chat.id;
-  if (!limiter.allow('/bias', cid)) return bot.sendMessage(cid, '⏳ Tunggu...');
+  if (!limiter.checkLimit('/bias')) return bot.sendMessage(cid, '⏳ Tunggu...');
 
   const loading = await bot.sendMessage(cid, '⏳ Cek bias...');
   try {
@@ -361,7 +361,7 @@ bot.onText(/^\/(bias|xauusd-bias)$/, async (m) => {
 // ======================================================
 bot.onText(/^\/(zones|ict)$/, async (m) => {
   const cid = m.chat.id;
-  if (!limiter.allow('/zones', cid)) return bot.sendMessage(cid, '⏳ Tunggu...');
+  if (!limiter.checkLimit('/zones')) return bot.sendMessage(cid, '⏳ Tunggu...');
 
   const loading = await bot.sendMessage(cid, '⏳ Scan zones...');
   try {
@@ -437,7 +437,7 @@ bot.onText(/^\/(zones|ict)$/, async (m) => {
 // ======================================================
 bot.onText(/^\/sweep$/, async (m) => {
   const cid = m.chat.id;
-  if (!limiter.allow('/sweep', cid)) return bot.sendMessage(cid, '⏳ Tunggu...');
+  if (!limiter.checkLimit('/sweep')) return bot.sendMessage(cid, '⏳ Tunggu...');
 
   const loading = await bot.sendMessage(cid, '⏳ Scan sweep...');
   try {
@@ -470,7 +470,7 @@ bot.onText(/^\/sweep$/, async (m) => {
 // ======================================================
 bot.onText(/^\/ot$/, async (m) => {
   const cid = m.chat.id;
-  if (!limiter.allow('/ot', cid)) return bot.sendMessage(cid, '⏳ Tunggu...');
+  if (!limiter.checkLimit('/ot')) return bot.sendMessage(cid, '⏳ Tunggu...');
 
   const loading = await bot.sendMessage(cid, '⏳ Hitung OTE...');
   try {
@@ -514,7 +514,7 @@ bot.onText(/^\/ot$/, async (m) => {
 async function detailTF(m, tf) {
   const cid = m.chat.id;
   const labels = { '15m': 'M15', '5m': 'M5' };
-  if (!limiter.allow('/' + tf, cid)) return bot.sendMessage(cid, '⏳ Tunggu...');
+  if (!limiter.checkLimit('/' + tf)) return bot.sendMessage(cid, '⏳ Tunggu...');
   const loading = await bot.sendMessage(cid, `⏳ ${labels[tf]}...`);
   try {
     const d = await getCandles(tf, 200);
