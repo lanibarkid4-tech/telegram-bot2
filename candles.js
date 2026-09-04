@@ -60,9 +60,9 @@ const YH_SYMBOLS = {
 const SYMBOL_MAP = TD_SYMBOLS;
 
 // Interval Twelve Data (sama dengan key TF_MAP)
-const TD_INTERVALS = new Set(['1min', '5min', '15min', '30min', '45min', '1h', '2h', '4h', '1day', '1week']);
+const TD_INTERVALS = new Set(['1min', '2min', '3min', '5min', '15min', '30min', '45min', '1h', '2h', '4h', '1day', '1week']);
 const FH_TF_MAP = {
-  '1min': '1', '5min': '5', '15min': '15', '30min': '30', '45min': '45',
+  '1min': '1', '2min': '2', '3min': '3', '5min': '5', '15min': '15', '30min': '30', '45min': '45',
   '1h': '60', '2h': '120', '4h': '240', '1day': 'D', '1week': 'W',
 };
 

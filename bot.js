@@ -37,7 +37,8 @@ const logger = new Logger('[bot]', 'info');
 
 const limiter = new RateLimiter({
   '/signal': 5, '/xauusd': 5, '/bias': 5, '/zones': 5,
-  '/sweep': 5, '/ot': 5, '/m15': 10, '/m5': 10,
+  '/sweep': 5, '/ot': 5, '/m15': 10, '/m5': 10, '/m3': 10, '/m2': 10, '/m1': 10,
+  '/scalp': 3, '/intra': 3, '/swing': 3, '/mode': 5,
 }, 60);
 
 const shutdown = new GracefulShutdown();
@@ -64,21 +65,89 @@ async function getCandles(tf, count = 200) {
 }
 
 // ======================================================
+//  MODE CONFIG: scalping / intraday / swing
+//  Masing-masing punya TF entry, SL/TP pip (XAU: 1 pip = 0.01)
+//  Default mode: intraday
+// ======================================================
+const MODES = {
+  scalping: {
+    label: 'SCALPING',
+    emoji: '⚡',
+    tfs: { bias: '1h', entry: '5m', confirm: '15m' },
+    atrMulSL: 0.6, atrMulTP: 1.0,  // TP = 1.0× ATR, SL = 0.6× ATR (R:R ~1.67)
+    pipsSL: 50, pipsTP: 100,        // 50/100 pips = 0.50/1.00 USD
+    holdBars: 6,                    // hold ~30 menit (5m × 6)
+    timeInTrade: '5-30 menit',
+    bestFor: 'Quick profit, banyak trade, butuh spread kecil'
+  },
+  intraday: {
+    label: 'INTRADAY',
+    emoji: '📊',
+    tfs: { bias: '4h', entry: '15m', confirm: '1h' },
+    atrMulSL: 1.0, atrMulTP: 2.0,   // R:R 1:2
+    pipsSL: 150, pipsTP: 300,
+    holdBars: 16,                   // hold ~4 jam (15m × 16)
+    timeInTrade: '1-4 jam',
+    bestFor: 'Hold beberapa jam, swing kecil-menengah'
+  },
+  swing: {
+    label: 'SWING',
+    emoji: '📈',
+    tfs: { bias: '1day', entry: '1h', confirm: '4h' },
+    atrMulSL: 1.5, atrMulTP: 3.0,   // R:R 1:2
+    pipsSL: 300, pipsTP: 600,
+    holdBars: 24,                   // hold ~24 jam
+    timeInTrade: '1-3 hari',
+    bestFor: 'Hold harian, target besar, lebih jarang trade'
+  }
+};
+let currentMode = 'intraday';
+
+function getMode(name) {
+  if (!name) return MODES[currentMode];
+  const k = name.toLowerCase();
+  return MODES[k] || MODES[currentMode];
+}
+
+// Hitung SL/TP combo: pakai max(ATR multiplier, fixed pips)
+// Ini supaya konsisten baik di market sepi (pakai pips) maupun volatil (pakai ATR)
+function calcSLTP(entry, atr, isBuy, mode) {
+  const slByAtr = atr * mode.atrMulSL;
+  const tpByAtr = atr * mode.atrMulTP;
+  const slByPips = mode.pipsSL * 0.01;  // 1 pip XAU = 0.01
+  const tpByPips = mode.pipsTP * 0.01;
+  const sl = Math.max(slByAtr, slByPips);
+  const tp = Math.max(tpByAtr, tpByPips);
+  return isBuy
+    ? { sl: entry - sl, tp: entry + tp }
+    : { sl: entry + sl, tp: entry - tp };
+}
+
+// ======================================================
 //  /start, /help
 // ======================================================
 const WELCOME = (n) => `Halo ${n}! 👋
 
-*XAU/USD Analyst* — Pure Teknikal + ICT.
+*XAU/USD Analyst* — Pure Teknikal + ICT + Multi-Mode.
+
+🎯 *MODE:* ${MODES[currentMode].emoji} *${MODES[currentMode].label}*
+   ${MODES[currentMode].timeInTrade} | ${MODES[currentMode].bestFor}
 
 📊 *PERINTAH:*
-/signal  — Signal lengkap (teknikal + ICT + momentum)
-/bias    — Trend H4/H1/M15/M5
-/zones   — OB, FVG, IFVG, Breaker
-/sweep   — Liquidity sweep
-/ot      — Optimal entry (premium/discount)
-/m15     — Detail M15
-/m5      — Detail M5
-/status  — Uptime
+/signal — Signal lengkap (mode aktif)
+/scalp  — Set mode SCALPING (50/100 pips)
+/intra  — Set mode INTRADAY (150/300 pips)
+/swing  — Set mode SWING (300/600 pips)
+/bias   — Trend H4/H1/M15/M5
+/zones  — OB, FVG, IFVG, Breaker
+/sweep  — Liquidity sweep
+/ot     — Optimal entry
+/m5     — Detail 5m
+/m15    — Detail 15m
+/m1     — Detail 1m
+/m2     — Detail 2m
+/m3     — Detail 3m
+/status — Uptime
 
 ⚠️ _Bukan saran finansial. MM yang baik._`;
 
@@ -213,32 +282,67 @@ function classifySetup(ta, ictA, h1Candles) {
 }
 
 // ======================================================
-//  /signal — Full signal
+//  /scalp, /intra, /swing — Set mode
+// ======================================================
+function setMode(m, name) {
+  const cid = m.chat.id;
+  const mode = MODES[name];
+  if (!mode) return;
+  currentMode = name;
+  const msg = `${mode.emoji} *MODE: ${mode.label}*\n` +
+    `⏱ Hold: ${mode.timeInTrade}\n` +
+    `🛑 SL: ${mode.pipsSL} pips ($${(mode.pipsSL * 0.01).toFixed(2)})\n` +
+    `🎯 TP: ${mode.pipsTP} pips ($${(mode.pipsTP * 0.01).toFixed(2)})\n` +
+    `📏 R:R = 1:${(mode.pipsTP / mode.pipsSL).toFixed(2)}\n` +
+    `📊 TF bias: ${mode.tfs.bias} | entry: ${mode.tfs.entry}\n` +
+    `\n_${mode.bestFor}_\n\n` +
+    `Ketik /signal untuk analisa dengan mode ini.`;
+  bot.sendMessage(cid, msg, { parse_mode: 'Markdown' });
+}
+
+bot.onText(/^\/(scalp|scalping)$/, (m) => setMode(m, 'scalping'));
+bot.onText(/^\/(intra|intraday)$/, (m) => setMode(m, 'intraday'));
+bot.onText(/^\/swing$/, (m) => setMode(m, 'swing'));
+bot.onText(/^\/mode$/, (m) => {
+  const m0 = getMode();
+  bot.sendMessage(m.chat.id,
+    `🎯 *MODE AKTIF:* ${m0.emoji} ${m0.label}\n` +
+    `⏱ ${m0.timeInTrade}\n` +
+    `📊 SL ${m0.pipsSL} / TP ${m0.pipsTP} pips\n\n` +
+    `Ganti: /scalp /intra /swing`,
+    { parse_mode: 'Markdown' }
+  );
+});
+
+// ======================================================
+//  /signal — Full signal (sesuai mode aktif)
 // ======================================================
 bot.onText(/^\/(signal|xauusd)$/, async (m) => {
   const cid = m.chat.id;
   if (!limiter.checkLimit('/signal')) return bot.sendMessage(cid, '⏳ Tunggu...');
 
-  const loading = await bot.sendMessage(cid, '⏳ Generate signal XAU/USD...');
+  const mode = getMode();
+  const loading = await bot.sendMessage(cid, `⏳ ${mode.emoji} ${mode.label} signal XAU/USD...`);
   try {
-    const [ta, h1] = await Promise.all([
+    const [ta, entryTF, biasTF] = await Promise.all([
       xauusdTA.analyze(true).catch(e => ({ ok: false, error: e.message })),
-      getCandles('1h', 200)
+      getCandles(mode.tfs.entry, 200),
+      getCandles(mode.tfs.bias, 200)
     ]);
 
     if (!ta.ok) {
       return bot.editMessageText('❌ Error: ' + ta.error, { chat_id: cid, message_id: loading.message_id });
     }
-    if (!h1 || h1.length < 50) {
-      return bot.editMessageText('❌ Data H1 kurang', { chat_id: cid, message_id: loading.message_id });
+    if (!entryTF || entryTF.length < 50) {
+      return bot.editMessageText('❌ Data ' + mode.tfs.entry + ' kurang', { chat_id: cid, message_id: loading.message_id });
     }
 
-    const ictA = ict.analyze(h1, { lookback: 80 });
-    const setup = classifySetup(ta, ictA, h1);
+    const ictA = ict.analyze(entryTF, { lookback: 80 });
+    const setup = classifySetup(ta, ictA, entryTF);
 
     if (setup.mode === 'NO_SETUP' || setup.mode === 'NO_DATA' || setup.mode === 'ERROR') {
       return bot.editMessageText(
-        `⚪ *XAU/USD — NO SETUP*\n` +
+        `⚪ *XAU/USD — NO SETUP* (${mode.label})\n` +
         `💰 $${fmt(ta.price)}\n` +
         `📊 Trend: ${setup.trendDir || 'NONE'}\n` +
         `📍 Zone: ${setup.inDiscount ? 'DISCOUNT' : setup.inPremium ? 'PREMIUM' : 'EQ'}\n` +
@@ -251,15 +355,30 @@ bot.onText(/^\/(signal|xauusd)$/, async (m) => {
     const emoji = isBuy ? '🟢' : '🔴';
     const dirText = isBuy ? 'BUY' : 'SELL';
     const last = setup.last;
-
-    // Hitung TP/SL dengan ATR
     const atr = ta.atr;
     const entry = ta.price;
-    const tp = isBuy ? entry + atr * 1.5 : entry - atr * 1.5;
-    const sl = isBuy ? entry - atr * 1.0 : entry + atr * 1.0;
+
+    // SL/TP sesuai MODE
+    const { sl, tp } = calcSLTP(entry, atr, isBuy, mode);
     const risk = Math.abs(entry - sl);
     const reward = Math.abs(tp - entry);
     const rr = reward / Math.max(0.01, risk);
+    const slPips = Math.round(risk / 0.01);
+    const tpPips = Math.round(reward / 0.01);
+
+    // Limit order recommendation
+    // BUY: limit di discount (entry lebih rendah), SL di bawah OB
+    // SELL: limit di premium (entry lebih tinggi), SL di atas OB
+    let limitOrder = '';
+    if (isBuy && setup.inDiscount) {
+      const limitPrice = entry - atr * 0.3;  // 0.3 ATR di bawah current
+      limitOrder = `📥 *LIMIT BUY:* $${fmt(limitPrice)} (di discount)`;
+    } else if (!isBuy && setup.inPremium) {
+      const limitPrice = entry + atr * 0.3;
+      limitOrder = `📥 *LIMIT SELL:* $${fmt(limitPrice)} (di premium)`;
+    } else {
+      limitOrder = `⚡ *MARKET ORDER* (bukan zone ideal)`;
+    }
 
     // Cari ICT zone konfirmasi
     let ictConf = '';
@@ -276,16 +395,19 @@ bot.onText(/^\/(signal|xauusd)$/, async (m) => {
     }
 
     const lines = [];
-    lines.push(`${emoji} *XAU/USD — ${dirText}* (${setup.mode})`);
-    lines.push(`💰 Price: *$${fmt(entry)}*`);
+    lines.push(`${emoji} *XAU/USD — ${dirText}* (${mode.label})`);
+    lines.push(`💰 Price: *$${fmt(entry)}* | ${mode.emoji} ${mode.timeInTrade}`);
     lines.push(`🎯 Confidence: *${setup.confidence}%*`);
     lines.push(`📊 RSI: ${fmt(ta.indicators.rsi, 1)} | MACD-h: ${fmt(ta.indicators.macd_hist, 3)}`);
     lines.push(`📈 Trend: ${setup.trendDir} | Zone: ${setup.inDiscount ? 'DISCOUNT' : setup.inPremium ? 'PREMIUM' : 'EQ'}`);
     lines.push('');
+    lines.push('━━━ ORDER ━━━');
+    lines.push(limitOrder);
+    lines.push(`📍 Market Entry: $${fmt(entry)}`);
+    lines.push('');
     lines.push('━━━ PLAN ━━━');
-    lines.push(`📍 Entry: *$${fmt(entry)}*`);
-    lines.push(`🎯 TP: *$${fmt(tp)}*`);
-    lines.push(`🛑 SL: *$${fmt(sl)}*`);
+    lines.push(`🎯 TP: *$${fmt(tp)}* (${tpPips} pips)`);
+    lines.push(`🛑 SL: *$${fmt(sl)}* (${slPips} pips)`);
     lines.push(`📏 R:R = 1:${fmt(rr, 2)} | ATR: $${fmt(atr)}`);
     if (ictConf) {
       lines.push('');
@@ -513,7 +635,7 @@ bot.onText(/^\/ot$/, async (m) => {
 // ======================================================
 async function detailTF(m, tf) {
   const cid = m.chat.id;
-  const labels = { '15m': 'M15', '5m': 'M5' };
+  const labels = { '15m': 'M15', '5m': 'M5', '3m': 'M3', '2m': 'M2', '1m': 'M1' };
   if (!limiter.checkLimit('/' + tf)) return bot.sendMessage(cid, '⏳ Tunggu...');
   const loading = await bot.sendMessage(cid, `⏳ ${labels[tf]}...`);
   try {
@@ -556,6 +678,9 @@ async function detailTF(m, tf) {
 }
 bot.onText(/^\/m15$/, (m) => detailTF(m, '15m'));
 bot.onText(/^\/m5$/, (m) => detailTF(m, '5m'));
+bot.onText(/^\/m3$/, (m) => detailTF(m, '3m'));
+bot.onText(/^\/m2$/, (m) => detailTF(m, '2m'));
+bot.onText(/^\/m1$/, (m) => detailTF(m, '1m'));
 
 // ======================================================
 //  Auto-reply
