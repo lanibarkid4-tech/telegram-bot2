@@ -39,11 +39,10 @@ if (!TOKEN) {
   process.exit(1);
 }
 
-const META_TOKEN = process.env.METAAPI_TOKEN;
-const META_ACC = process.env.METAAPI_ACCOUNT_ID;
+const TD_KEY = process.env.TWELVE_DATA_API_KEY;
 console.log('========================================');
 console.log('🏆 XAU/USD PRO ANALYST (Trader-Grade)');
-console.log('📡 MetaAPI: ' + (META_TOKEN && META_ACC ? 'ON' : 'OFF (set METAAPI_TOKEN & METAAPI_ACCOUNT_ID)'));
+console.log('📡 Yahoo (primary) + TwelveData (backup): ' + (TD_KEY ? 'FULL' : 'YAHOO ONLY'));
 console.log('⏰ ' + new Date().toLocaleString());
 console.log('========================================');
 
@@ -395,7 +394,7 @@ bot.onText(/^\/status$/, (m) => {
   bot.sendMessage(m.chat.id,
     '🟢 *PRO STATUS*\n' +
     `⏱ ${h}h ${min}m ${s}s\n` +
-    `📡 MetaAPI: ${META_TOKEN && META_ACC ? '✅' : '❌'}\n` +
+    `📡 Yahoo (primary) + TD (backup): ${TD_KEY ? '✅' : '🟡 (no backup)'}\n` +
     `🎯 Mode: ${MODES[currentMode].emoji} ${MODES[currentMode].label}\n` +
     `🌐 Session: ${sess.emoji} ${sess.name} (${sess.quality})`,
     { parse_mode: 'Markdown' }

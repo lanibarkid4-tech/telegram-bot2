@@ -1,53 +1,36 @@
 // ======================================================
-//  CANDLES PROVIDER — MetaAPI.cloud ONLY
-//  Endpoint: https://mt-provisioning-api-v1.agiliumtrade.agiliumtrade.ai
-//  Auth: Bearer {METAAPI_TOKEN}
-//  Account: {METAAPI_ACCOUNT_ID}
+//  CANDLES PROVIDER — Yahoo (primary) + Twelve Data (backup)
+//  Primary:  Yahoo Finance   -> tanpa API key, OHLC lengkap, multi-TF
+//  Backup:   Twelve Data     -> kalau Yahoo rate-limited / error
 //
-//  Catatan: MetaAPI butuh MT4/MT5 account yang sudah di-deploy.
-//  Setup:
-//    1. Daftar di https://app.metaapi.cloud (free tier: 100k CU/bulan)
-//    2. Tambah MT5 broker account (paper trading atau real)
-//    3. Deploy account (tunggu status DEPLOYED)
-//    4. Copy METAAPI_TOKEN dan METAAPI_ACCOUNT_ID ke .env Railway
+//  Gratis 100%, hanya butuh TWELVE_DATA_API_KEY (opsional).
+//  Yahoo endpoint: https://query1.finance.yahoo.com/v8/finance/chart/
 // ======================================================
 const https = require('https');
 const { SimpleCache, Logger } = require('./utils');
 
-const logger = new Logger('[metaapi]', 'info');
+const logger = new Logger('[candles]', 'info');
 
-const METAAPI_TOKEN = process.env.METAAPI_TOKEN;
-const METAAPI_ACCOUNT_ID = process.env.METAAPI_ACCOUNT_ID;
-const METAAPI_BASE = 'mt-provisioning-api-v1.agiliumtrade.agiliumtrade.ai';
-const METAAPI_DATA_BASE = 'mt-market-data-client-v1.agiliumtrade.agiliumtrade.ai';
+const TD_KEY = process.env.TWELVE_DATA_API_KEY;
+const TD_BASE = 'api.twelvedata.com';
+const YH_BASE = 'query1.finance.yahoo.com';
 
 const tfCache = new SimpleCache(60, 50);
 
-// ======================================================
-//  HTTP helpers
-// ======================================================
-function httpsRequest(host, path, method = 'GET', timeoutMs = 15000) {
+function fetchJson(host, path, timeoutMs = 15000, extraHeaders = {}) {
   return new Promise((resolve, reject) => {
     const req = https.request({
-      host,
-      path,
-      method,
-      timeout: timeoutMs,
-      headers: {
-        'Authorization': 'Bearer ' + METAAPI_TOKEN,
-        'Content-Type': 'application/json',
-        'User-Agent': 'telegram-bot-xauusd/1.0'
-      }
+      host, path, method: 'GET', timeout: timeoutMs,
+      headers: { 'User-Agent': 'Mozilla/5.0', ...extraHeaders }
     }, (res) => {
       let data = '';
       res.on('data', chunk => data += chunk);
       res.on('end', () => {
-        if (res.statusCode === 204) return resolve(null);
         if (res.statusCode >= 200 && res.statusCode < 300) {
           try { resolve(JSON.parse(data)); }
-          catch (e) { resolve(data); }
+          catch (e) { reject(new Error('Parse gagal: ' + e.message)); }
         } else {
-          reject(new Error(`MetaAPI ${res.statusCode}: ${data.slice(0, 300)}`));
+          reject(new Error(`HTTP ${res.statusCode}: ${data.slice(0, 200)}`));
         }
       });
     });
@@ -64,115 +47,127 @@ function num(v) {
 }
 
 // ======================================================
-//  TF mapping
-//  MetaAPI format: "1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w"
-//  Bot internal: "1min", "5min", "15min", "30min", "1h", "4h", "1day", "1week"
+//  Symbol mapping per provider
 // ======================================================
-const TF_MAP = {
-  '1min': '1m', '2min': '2m', '3min': '3m', '5min': '5m',
-  '10min': '10m', '15min': '15m', '30min': '30m', '45min': '45m',
-  '1h': '1h', '2h': '2h', '3h': '3h', '4h': '4h', '6h': '6h', '8h': '8h', '12h': '12h',
-  '1day': '1d', '1week': '1w', '1month': '1mn'
+const TD_SYMBOLS = {
+  xauusd: 'XAU/USD', gold: 'XAU/USD', xau: 'XAU/USD',
+  xagusd: 'XAG/USD', silver: 'XAG/USD', xag: 'XAG/USD',
+  eurusd: 'EUR/USD', gbpusd: 'GBP/USD', gbpjpy: 'GBP/JPY',
+  usdjpy: 'USD/JPY', audusd: 'AUD/USD', nzdusd: 'NZD/USD',
+  usdcad: 'USD/CAD', usdchf: 'USD/CHF',
+  btcusd: 'BTC/USD', ethusd: 'ETH/USD',
+  dxy: 'DXY', nasdaq: 'NDX', spx: 'SPX'
 };
 
-// Symbol mapping — MetaAPI pake format broker
-// XAUUSD default adalah spot gold (mayoritas broker MT5)
-const SYMBOL_MAP = {
-  xauusd: 'XAUUSD',
-  gold: 'XAUUSD',
-  xau: 'XAUUSD',
-  xagusd: 'XAGUSD',
-  silver: 'XAGUSD',
-  eurusd: 'EURUSD',
-  gbpjpy: 'GBPJPY',
-  gbpusd: 'GBPUSD',
-  usdjpy: 'USDJPY',
-  audusd: 'AUDUSD',
-  nzdusd: 'NZDUSD',
-  usdcad: 'USDCAD',
-  usdchf: 'USDCHF',
-  btcusd: 'BTCUSD',
-  btcusdt: 'BTCUSDT',
-  ethusd: 'ETHUSD',
-  ethusdt: 'ETHUSDT',
-  dxy: 'DXY',
-  nasdaq: 'NAS100',
-  spx: 'SPX500',
-  us30: 'US30'
+const YH_SYMBOLS = {
+  xauusd: 'GC=F', gold: 'GC=F', xau: 'GC=F',
+  xagusd: 'SI=F', silver: 'SI=F', xag: 'SI=F',
+  eurusd: 'EURUSD=X', gbpusd: 'GBPUSD=X', gbpjpy: 'GBPJPY=X',
+  usdjpy: 'USDJPY=X', audusd: 'AUDUSD=X', nzdusd: 'NZDUSD=X',
+  usdcad: 'USDCAD=X', usdchf: 'USDCHF=X',
+  btcusd: 'BTC-USD', ethusd: 'ETH-USD',
+  dxy: 'DX-Y.NYB', nasdaq: '^NDX', spx: '^GSPC'
 };
 
-function resolveSymbol(input) {
+function resolveSymbol(input, provider) {
   if (!input) return null;
   const k = String(input).toLowerCase().replace(/[^a-z]/g, '');
-  return SYMBOL_MAP[k] || input.toUpperCase();
+  if (provider === 'td') return TD_SYMBOLS[k] || input.toUpperCase();
+  return YH_SYMBOLS[k] || input.toUpperCase();
 }
 
 // ======================================================
-//  Check account status (harus DEPLOYED)
+//  Timeframe mapping
 // ======================================================
-let accountCheckPromise = null;
-async function ensureAccountReady() {
-  if (!METAAPI_TOKEN || !METAAPI_ACCOUNT_ID) {
-    throw new Error('METAAPI_TOKEN atau METAAPI_ACCOUNT_ID belum di-set di Railway Variables. Daftar di https://app.metaapi.cloud');
+const TD_INTERVALS = new Set(['1min', '2min', '3min', '5min', '10min', '15min', '30min', '45min', '1h', '2h', '4h', '1day', '1week']);
+
+const YH_TF_MAP = {
+  '1min': { interval: '1m', range: '5d' },
+  '2min': { interval: '2m', range: '5d' },
+  '3min': { interval: '5m', range: '5d' },   // Yahoo ga ada 3m, fallback 5m
+  '5min': { interval: '5m', range: '1mo' },
+  '10min': { interval: '15m', range: '1mo' },
+  '15min': { interval: '15m', range: '1mo' },
+  '30min': { interval: '30m', range: '2mo' },
+  '45min': { interval: '60m', range: '3mo' },
+  '1h': { interval: '60m', range: '3mo' },
+  '2h': { interval: '60m', range: '6mo' },
+  '4h': { interval: '60m', range: '1y' },
+  '1day': { interval: '1d', range: '2y' },
+  '1week': { interval: '1wk', range: '5y' }
+};
+
+// ======================================================
+//  YAHOO FINANCE (primary, tanpa key)
+// ======================================================
+async function fetchYahoo(symbol, interval, outputsize) {
+  const sym = resolveSymbol(symbol, 'yh');
+  const tf = YH_TF_MAP[interval] || YH_TF_MAP['1h'];
+  const path = `/v8/finance/chart/${encodeURIComponent(sym)}?interval=${tf.interval}&range=${tf.range}`;
+  const data = await fetchJson(YH_BASE, path);
+  const result = data.chart && data.chart.result && data.chart.result[0];
+  if (!result || !result.timestamp || !result.timestamp.length) {
+    const err = data.chart && data.chart.error;
+    throw new Error('Yahoo: ' + ((err && err.description) || `no data ${sym} ${interval}`));
   }
-  if (accountCheckPromise) return accountCheckPromise;
-
-  accountCheckPromise = (async () => {
-    const acc = await httpsRequest(
-      METAAPI_BASE,
-      `/users/current/accounts/${METAAPI_ACCOUNT_ID}`
-    );
-    if (!acc) throw new Error('MetaAPI: account tidak ditemukan');
-    if (acc.state !== 'DEPLOYED') {
-      throw new Error(`MetaAPI account belum DEPLOYED (state: ${acc.state}). Tunggu deploy selesai.`);
-    }
-    logger.info(`Account ${acc.login} @ ${acc.server} ready (${acc.type}, ${acc.region})`);
-    return acc;
-  })().catch(e => {
-    accountCheckPromise = null; // reset untuk retry
-    throw e;
-  });
-
-  return accountCheckPromise;
-}
-
-// ======================================================
-//  Fetch historical candles
-//  Endpoint: /users/current/accounts/{accountId}/historical-market-data/symbols/{symbol}/timeframes/{tf}/candles
-// ======================================================
-async function fetchMetaAPI(symbol, interval, outputsize) {
-  await ensureAccountReady();
-
-  const sym = resolveSymbol(symbol);
-  const tf = TF_MAP[interval] || '1h';
-
-  const startTime = new Date(Date.now() - outputsize * 60 * 60 * 1000 * 1.5); // 1.5x buffer
-  const params = `?startTime=${startTime.toISOString()}&limit=${Math.min(outputsize, 5000)}`;
-
-  const path = `/users/current/accounts/${METAAPI_ACCOUNT_ID}/historical-market-data/symbols/${sym}/timeframes/${tf}/candles${params}`;
-
-  const data = await httpsRequest(METAAPI_DATA_BASE, path);
-
-  if (!data || !Array.isArray(data) || data.length === 0) {
-    throw new Error(`MetaAPI: tidak ada data ${sym} ${tf}. Pastikan symbol ada di broker lo.`);
+  const q = result.indicators.quote[0];
+  const out = [];
+  for (let i = 0; i < result.timestamp.length; i++) {
+    if (q.close[i] === null || q.close[i] === undefined) continue;
+    out.push({
+      openTime: result.timestamp[i] * 1000,
+      open: num(q.open[i]),
+      high: num(q.high[i]),
+      low: num(q.low[i]),
+      close: num(q.close[i]),
+      volume: num(q.volume[i]) || 0
+    });
   }
-
-  return data.map(c => {
-    // MetaAPI returns: { time, open, high, low, close, tickVolume, volume, spread }
-    const ts = typeof c.time === 'string' ? new Date(c.time).getTime() : c.time;
-    return {
-      openTime: ts,
-      open: num(c.open),
-      high: num(c.high),
-      low: num(c.low),
-      close: num(c.close),
-      volume: num(c.volume) || num(c.tickVolume) || 0
-    };
-  }).filter(c => c.open !== null && c.close !== null);
+  if (!out.length) throw new Error(`Yahoo: no valid data ${sym} ${interval}`);
+  return out.slice(-outputsize);
 }
 
 // ======================================================
-//  Public API
+//  TWELVE DATA (backup, perlu key)
+// ======================================================
+let tdTimestamps = [];
+async function tdThrottle() {
+  const now = Date.now();
+  tdTimestamps = tdTimestamps.filter(t => now - t < 60000);
+  if (tdTimestamps.length >= 7) {
+    const waitMs = 60000 - (now - tdTimestamps[0]) + 100;
+    logger.info(`Twelve Data mendekati limit, antri ${Math.ceil(waitMs / 1000)}s...`);
+    await new Promise(r => setTimeout(r, waitMs));
+    return tdThrottle();
+  }
+  tdTimestamps.push(now);
+}
+
+async function fetchTD(symbol, interval, outputsize) {
+  if (!TD_INTERVALS.has(interval)) {
+    throw new Error(`Twelve Data tidak support TF ${interval}`);
+  }
+  await tdThrottle();
+  const sym = resolveSymbol(symbol, 'td');
+  const path = `/v1/time_series?symbol=${encodeURIComponent(sym)}&interval=${interval}&outputsize=${outputsize}&apikey=${TD_KEY}`;
+  const data = await fetchJson(TD_BASE, path);
+  if (data.status === 'error') throw new Error('Twelve Data: ' + (data.message || 'unknown'));
+  const values = data.values || [];
+  if (!values.length) throw new Error('Twelve Data: no data ' + sym);
+  // TD returns newest first, reverse to oldest first
+  return values.reverse().map(c => ({
+    openTime: new Date(c.datetime).getTime(),
+    open: num(c.open),
+    high: num(c.high),
+    low: num(c.low),
+    close: num(c.close),
+    volume: num(c.volume) || 0
+  }));
+}
+
+// ======================================================
+//  PUBLIC API
+//  Strategy: Yahoo first, fall back ke Twelve Data
 // ======================================================
 async function getCandles(symbol, interval = '1h', outputsize = 100) {
   if (!symbol) throw new Error('Symbol kosong');
@@ -181,13 +176,34 @@ async function getCandles(symbol, interval = '1h', outputsize = 100) {
   const cached = tfCache.get(cacheKey);
   if (cached) return cached;
 
-  const candles = await fetchMetaAPI(symbol, interval, outputsize);
-  tfCache.set(cacheKey, candles);
-  logger.info(`[metaapi] ${candles.length} candles ${symbol} ${interval}`);
-  return candles;
+  const errors = [];
+
+  // Primary: Yahoo Finance
+  try {
+    const data = await fetchYahoo(symbol, interval, outputsize);
+    tfCache.set(cacheKey, data);
+    logger.info(`[yahoo] ${data.length} candles ${symbol} ${interval}`);
+    return data;
+  } catch (e) {
+    errors.push('yahoo: ' + e.message);
+  }
+
+  // Backup: Twelve Data
+  if (TD_KEY) {
+    try {
+      const data = await fetchTD(symbol, interval, outputsize);
+      tfCache.set(cacheKey, data);
+      logger.info(`[twelvedata] ${data.length} candles ${symbol} ${interval}`);
+      return data;
+    } catch (e) {
+      errors.push('twelvedata: ' + e.message);
+    }
+  }
+
+  throw new Error(errors.join(' | ') || 'Tidak ada data candles');
 }
 
-async function getMultiTimeframe(symbol, tfs = ['1day', '4h', '1h', '15m'], outputsize = 100) {
+async function getMultiTimeframe(symbol, tfs = ['1day', '4h', '1h', '15min'], outputsize = 100) {
   const results = {};
   for (const tf of tfs) {
     try {
@@ -201,24 +217,11 @@ async function getMultiTimeframe(symbol, tfs = ['1day', '4h', '1h', '15m'], outp
   return results;
 }
 
-// ======================================================
-//  Account info (untuk /status)
-// ======================================================
-async function getAccountInfo() {
-  try {
-    return await ensureAccountReady();
-  } catch (e) {
-    return { error: e.message };
-  }
-}
-
 module.exports = {
   getCandles,
   getMultiTimeframe,
   resolveSymbol,
-  getAccountInfo,
-  // back-compat
-  TD_SYMBOLS: SYMBOL_MAP,
-  FH_SYMBOLS: SYMBOL_MAP,
-  YH_SYMBOLS: SYMBOL_MAP
+  TD_SYMBOLS,
+  FH_SYMBOLS: TD_SYMBOLS,  // back-compat
+  YH_SYMBOLS
 };
