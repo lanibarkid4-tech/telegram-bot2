@@ -1,66 +1,47 @@
 ﻿// ======================================================
-//  🤖 XAU/USD PRO ANALYST — Trader-Grade Signal Engine
+//  🤖 XAUUSD ICT/SMC ANALYST — Interactive Bot
 // ======================================================
-//  Logic: Multi-confluence scoring (minimal 3 dari 7 indikator)
-//         + ICT smart money + session filter + news filter
-//         + risk management + SL 50 pips dari zone
+//  Flow:
+//    /xauusd  → pilih TF (M1/M5/M15/M30/H1/H4/D1)
+//             → pilih Mode (Scalping / Intraday / Swing)
+//             → analisa sesuai template ICT/SMC
 //
-//  7 Konfirmasi Signal:
-//    1. TREND       (EMA 9/21/50 + structure HH/HL atau LH/LL)
-//    2. MOMENTUM    (RSI + MACD histogram)
-//    3. ICT ZONE    (OB / FVG / OTE premium-discount)
-//    4. SWEEP       (liquidity grab di swing high/low)
-//    5. STRUCTURE   (BOS / CHoCH / MSS)
-//    6. SESSION     (London / NY = high volatility, Asia = ranging)
-//    7. RISK/REWARD (min 1:2, ideal 1:3)
-//
-//  Scoring:
-//    - 7/7 = 95% confidence (SNIPER)
-//    - 6/7 = 85%
-//    - 5/7 = 75%
-//    - 4/7 = 60%
-//    - 3/7 = 45% (minimal)
-//    - <3 = NO SETUP
+//  Methodology: Top-down MTF (HTF bias → mid TF zone → LTF entry)
+//               + 5-point confluence scoring
 // ======================================================
 
 require('dotenv').config();
 
 const TelegramBot = require('node-telegram-bot-api');
-
 const candles = require('./candles');
 const xauusdTA = require('./xauusd-ta');
 const ict = require('./ict-structures');
 const { RateLimiter, Logger, GracefulShutdown } = require('./utils');
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-
 if (!TOKEN) {
-  console.log('❌ TELEGRAM_BOT_TOKEN kosong! Isi di .env');
+  console.log('❌ TELEGRAM_BOT_TOKEN kosong!');
   process.exit(1);
 }
 
 const TD_KEY = process.env.TWELVE_DATA_API_KEY;
 console.log('========================================');
-console.log('🏆 XAU/USD PRO ANALYST (Trader-Grade)');
-console.log('📡 Yahoo (primary) + TwelveData (backup): ' + (TD_KEY ? 'FULL' : 'YAHOO ONLY'));
+console.log('🏆 XAUUSD ICT/SMC ANALYST');
+console.log('📡 Yahoo + TD: ' + (TD_KEY ? 'FULL' : 'YAHOO ONLY'));
 console.log('⏰ ' + new Date().toLocaleString());
 console.log('========================================');
 
 const bot = new TelegramBot(TOKEN, { polling: false });
-const logger = new Logger('[pro]', 'info');
-
-const limiter = new RateLimiter({
-  '/signal': 5, '/xauusd': 5, '/bias': 5, '/zones': 5,
-  '/sweep': 5, '/ot': 5, '/m15': 10, '/m5': 10, '/m3': 10, '/m2': 10, '/m1': 10,
-  '/scalp': 3, '/intra': 3, '/swing': 3, '/mode': 5,
-  '/analyze': 5, '/grade': 5,
-}, 60);
-
+const logger = new Logger('[bot]', 'info');
+const limiter = new RateLimiter({ '/xauusd': 5, '/start': 5, '/help': 5, '/status': 5, '/cancel': 5 }, 60);
 const shutdown = new GracefulShutdown();
 shutdown.init();
 
 const fmt = (n, d = 2) => (n === null || n === undefined || !Number.isFinite(n)) ? '—' : Number(n).toFixed(d);
 
+// ======================================================
+//  CACHE
+// ======================================================
 const cache = {
   _s: {},
   get(k) { const e = this._s[k]; if (!e) return null; if (Date.now() > e.exp) { delete this._s[k]; return null; } return e.v; },
@@ -77,311 +58,435 @@ async function getCandles(tf, count = 200) {
 }
 
 // ======================================================
-//  MODES
+//  STATE MANAGEMENT (per user step)
 // ======================================================
-const MODES = {
-  scalping: {
-    label: 'SCALPING',
-    emoji: '⚡',
-    tfs: { bias: '1h', entry: '5m', confirm: '15m' },
-    slPipsFromZone: 50, tpMultiplier: 3,
-    holdBars: 6, timeInTrade: '5-30 menit',
-    bestFor: 'Quick profit di zone, R:R 1:3'
-  },
-  intraday: {
-    label: 'INTRADAY',
-    emoji: '📊',
-    tfs: { bias: '4h', entry: '15m', confirm: '1h' },
-    slPipsFromZone: 50, tpMultiplier: 3,
-    holdBars: 16, timeInTrade: '1-4 jam',
-    bestFor: 'Hold di zone premium/discount, R:R 1:3'
-  },
-  swing: {
-    label: 'SWING',
-    emoji: '📈',
-    tfs: { bias: '1day', entry: '1h', confirm: '4h' },
-    slPipsFromZone: 50, tpMultiplier: 3,
-    holdBars: 24, timeInTrade: '1-3 hari',
-    bestFor: 'Hold dari zone besar, target 1:3'
+const userState = {}; // { chatId: { step, tf, mode } }
+
+function setState(chatId, state) { userState[chatId] = { ...userState[chatId], ...state }; }
+function getState(chatId) { return userState[chatId] || {}; }
+function clearState(chatId) { delete userState[chatId]; }
+
+// ======================================================
+//  KEYBOARDS
+// ======================================================
+const TF_KEYBOARD = {
+  reply_markup: {
+    inline_keyboard: [
+      [
+        { text: 'M1 ⚡', callback_data: 'tf_1m' },
+        { text: 'M5', callback_data: 'tf_5m' },
+        { text: 'M15', callback_data: 'tf_15m' },
+        { text: 'M30', callback_data: 'tf_30m' }
+      ],
+      [
+        { text: 'H1', callback_data: 'tf_1h' },
+        { text: 'H4', callback_data: 'tf_4h' },
+        { text: 'D1', callback_data: 'tf_1day' }
+      ],
+      [
+        { text: '❌ Cancel', callback_data: 'cancel' }
+      ]
+    ]
   }
 };
-let currentMode = 'intraday';
 
-function getMode(name) {
-  if (!name) return MODES[currentMode];
-  return MODES[name.toLowerCase()] || MODES[currentMode];
-}
-
-// ======================================================
-//  SESSION DETECTION
-//  Asia: 00:00-08:00 UTC (low vol, ranging)
-//  London: 08:00-16:00 UTC (trending, high vol)
-//  NY: 13:00-22:00 UTC (volatile, news-driven)
-//  London+NY overlap: 13:00-16:00 UTC (best time, highest vol)
-// ======================================================
-function getSession() {
-  const h = new Date().getUTCHours();
-  if (h >= 13 && h < 16) return { name: 'LONDON+NY OVERLAP', emoji: '🔥', quality: 'BEST' };
-  if (h >= 8 && h < 13) return { name: 'LONDON', emoji: '🇬🇧', quality: 'HIGH' };
-  if (h >= 16 && h < 22) return { name: 'NEW YORK', emoji: '🇺🇸', quality: 'HIGH' };
-  if (h >= 22 || h < 0) return { name: 'ASIA', emoji: '🌏', quality: 'LOW' };
-  return { name: 'QUIET', emoji: '⏸', quality: 'LOW' };
-}
+const MODE_KEYBOARD = {
+  reply_markup: {
+    inline_keyboard: [
+      [
+        { text: '⚡ Scalping', callback_data: 'mode_scalping' },
+        { text: '📊 Intraday', callback_data: 'mode_intraday' }
+      ],
+      [
+        { text: '📈 Swing', callback_data: 'mode_swing' }
+      ],
+      [
+        { text: '⬅️ Kembali pilih TF', callback_data: 'back_tf' },
+        { text: '❌ Cancel', callback_data: 'cancel' }
+      ]
+    ]
+  }
+};
 
 // ======================================================
-//  ICT ZONE FINDER
+//  ICT ANALYSIS ENGINE
 // ======================================================
-function findEntryZone(ictA, isBuy, currentPrice) {
-  if (isBuy) {
-    const ob = (ictA.orderBlocks || []).find(o => o.type === 'BULLISH_OB' && o.high < currentPrice);
-    if (ob) return { type: 'BULLISH_OB', price: ob.midpoint, low: ob.low, high: ob.high, strength: ob.strength || 1 };
-    const fvg = (ictA.fvgs || []).find(f => f.type === 'BULLISH_FVG' && f.high < currentPrice);
-    if (fvg) return { type: 'BULLISH_FVG', price: fvg.midpoint, low: fvg.low, high: fvg.high };
-    if (ictA.premiumDiscount && ictA.premiumDiscount.zone === 'DISCOUNT') {
-      return { type: 'DISCOUNT_OTE', price: ictA.premiumDiscount.oTE_buy, low: ictA.premiumDiscount.swingLow, high: ictA.premiumDiscount.oTE_buy };
+
+// Deteksi struktur (BOS/CHoCH)
+function detectStructure(candles) {
+  if (!candles || candles.length < 10) return { trend: 'UNKNOWN', structure: 'NONE', lastSwing: null };
+  const last = candles[candles.length - 1];
+  const recent = candles.slice(-20);
+
+  // Swing high/low detection
+  const swingHighs = [];
+  const swingLows = [];
+  for (let i = 2; i < recent.length - 2; i++) {
+    if (recent[i].high > recent[i-1].high && recent[i].high > recent[i+1].high &&
+        recent[i].high > recent[i-2].high && recent[i].high > recent[i+2].high) {
+      swingHighs.push({ i, price: recent[i].high });
     }
-  } else {
-    const ob = (ictA.orderBlocks || []).find(o => o.type === 'BEARISH_OB' && o.low > currentPrice);
-    if (ob) return { type: 'BEARISH_OB', price: ob.midpoint, low: ob.low, high: ob.high, strength: ob.strength || 1 };
-    const fvg = (ictA.fvgs || []).find(f => f.type === 'BEARISH_FVG' && f.low > currentPrice);
-    if (fvg) return { type: 'BEARISH_FVG', price: fvg.midpoint, low: fvg.low, high: fvg.high };
-    if (ictA.premiumDiscount && ictA.premiumDiscount.zone === 'PREMIUM') {
-      return { type: 'PREMIUM_OTE', price: ictA.premiumDiscount.oTE_sell, low: ictA.premiumDiscount.oTE_sell, high: ictA.premiumDiscount.swingHigh };
+    if (recent[i].low < recent[i-1].low && recent[i].low < recent[i+1].low &&
+        recent[i].low < recent[i-2].low && recent[i].low < recent[i+2].low) {
+      swingLows.push({ i, price: recent[i].low });
     }
   }
-  return null;
-}
 
-function calcSLTPFromZone(zone, isBuy, mode) {
-  const slDistUSD = mode.slPipsFromZone * 0.01;
-  const entry = zone.price;
-  let sl;
-  if (isBuy) {
-    sl = Math.min(zone.low - slDistUSD, entry - slDistUSD);
-  } else {
-    sl = Math.max(zone.high + slDistUSD, entry + slDistUSD);
+  // Higher highs/lows detection
+  let higherHighs = 0, lowerHighs = 0, higherLows = 0, lowerLows = 0;
+  for (let i = 1; i < swingHighs.length; i++) {
+    if (swingHighs[i].price > swingHighs[i-1].price) higherHighs++;
+    else lowerHighs++;
   }
-  const slDist = Math.abs(entry - sl);
-  const tpDist = slDist * mode.tpMultiplier;
-  const tp = isBuy ? entry + tpDist : entry - tpDist;
-  return { entry, sl, tp, slDist, tpDist };
-}
-
-// ======================================================
-//  CORE PRO ANALYSIS — 7-CONFLUENCE SCORING
-// ======================================================
-async function proAnalyze(modeName) {
-  const mode = getMode(modeName);
-  const session = getSession();
-
-  // Fetch data parallel
-  const [ta, entryTF, biasTF, confirmTF] = await Promise.all([
-    xauusdTA.analyze(true),
-    getCandles(mode.tfs.entry, 200),
-    getCandles(mode.tfs.bias, 200),
-    getCandles(mode.tfs.confirm, 200)
-  ]);
-
-  if (!ta.ok) return { error: ta.error || 'no ta' };
-  if (!entryTF || entryTF.length < 50) return { error: 'Data ' + mode.tfs.entry + ' tidak cukup' };
-
-  const ictA = ict.analyze(entryTF, { lookback: 80 });
-  const ictBias = ict.analyze(biasTF, { lookback: 50 });
-  const ictConfirm = ict.analyze(confirmTF, { lookback: 50 });
-
-  const price = ta.price;
-  const closes = entryTF.map(c => c.close);
-  const lastCandle = entryTF[entryTF.length - 1];
-
-  // ============ 7 CONFLUENCES ============
-
-  // 1. TREND (H1/H4 bias)
-  const trendDir = ta.indicators.ema_trend;
-  const trendStrong = trendDir === 'STRONG_UP' || trendDir === 'STRONG_DOWN';
-  const trendBull = trendDir === 'STRONG_UP' || trendDir === 'WEAK_UP';
-  const trendBear = trendDir === 'STRONG_DOWN' || trendDir === 'WEAK_DOWN';
-  const conf1 = trendStrong ? 'STRONG' : (trendBull || trendBear ? 'WEAK' : 'NONE');
-
-  // 2. MOMENTUM (RSI + MACD)
-  const rsi = ta.indicators.rsi;
-  const macdH = ta.indicators.macd_hist;
-  const rsiBull = rsi > 50 && rsi < 75;
-  const rsiBear = rsi < 50 && rsi > 25;
-  const rsiExtreme = (rsi < 30 || rsi > 70);
-  const macdBull = macdH > 0;
-  const macdBear = macdH < 0;
-  const conf2 = (rsiBull && macdBull) || (rsiBear && macdBear) ? 'STRONG' :
-                 (rsiBull || macdBull || rsiBear || macdBear) ? 'WEAK' : 'NONE';
-
-  // 3. ICT ZONE
-  const inDiscount = ictA.premiumDiscount && ictA.premiumDiscount.zone === 'DISCOUNT';
-  const inPremium = ictA.premiumDiscount && ictA.premiumDiscount.zone === 'PREMIUM';
-  const buyOB = (ictA.orderBlocks || []).find(o => o.type === 'BULLISH_OB' && o.high < price);
-  const sellOB = (ictA.orderBlocks || []).find(o => o.type === 'BEARISH_OB' && o.low > price);
-  const hasBuyZone = !!(buyOB || inDiscount);
-  const hasSellZone = !!(sellOB || inPremium);
-  const conf3 = (buyOB || sellOB) ? 'STRONG' : (hasBuyZone || hasSellZone) ? 'WEAK' : 'NONE';
-
-  // 4. SWEEP (liquidity grab)
-  const recentSweep = (ictA.sweeps || [])[0];
-  const hasBullSweep = recentSweep && recentSweep.direction === 'BULLISH' && recentSweep.rejected;
-  const hasBearSweep = recentSweep && recentSweep.direction === 'BEARISH' && recentSweep.rejected;
-  const conf4 = (hasBullSweep || hasBearSweep) ? 'STRONG' : 'NONE';
-
-  // 5. STRUCTURE (BOS / MSS)
-  const struct = ictA.structure || ictConfirm.structure;
-  const bos = struct && struct.bos;
-  const mss = struct && struct.mss;
-  const bosBull = bos && bos.type === 'BULLISH_BOS';
-  const bosBear = bos && bos.type === 'BEARISH_BOS';
-  const mssBull = mss && mss.type === 'BULLISH_MSS';
-  const mssBear = mss && mss.type === 'BEARISH_MSS';
-  const conf5 = (bos || mss) ? 'STRONG' : 'NONE';
-
-  // 6. SESSION quality
-  const conf6 = (session.quality === 'BEST') ? 'STRONG' :
-                 (session.quality === 'HIGH') ? 'WEAK' : 'NONE';
-
-  // 7. RISK/REWARD (auto satisfied kalau pakai mode, always >= 1:2)
-  const conf7 = 'STRONG';  // mode config guarantee 1:3
-
-  // ============ DECISION ============
-  const confluences = [
-    { name: 'TREND', score: conf1 },
-    { name: 'MOMENTUM', score: conf2 },
-    { name: 'ICT ZONE', score: conf3 },
-    { name: 'SWEEP', score: conf4 },
-    { name: 'STRUCTURE', score: conf5 },
-    { name: 'SESSION', score: conf6 },
-    { name: 'RISK/REWARD', score: conf7 }
-  ];
-
-  const strongCount = confluences.filter(c => c.score === 'STRONG').length;
-  const weakCount = confluences.filter(c => c.score === 'WEAK').length;
-  const totalScore = strongCount + (weakCount * 0.5);
-
-  // Tentukan direction
-  let dir = null;
-  let dirScore = { BUY: 0, SELL: 0 };
-
-  // TREND vote
-  if (trendBull) dirScore.BUY += trendStrong ? 2 : 1;
-  if (trendBear) dirScore.SELL += trendStrong ? 2 : 1;
-
-  // MOMENTUM vote
-  if (rsiBull && macdBull) dirScore.BUY += 2;
-  else if (rsiBull || macdBull) dirScore.BUY += 1;
-  if (rsiBear && macdBear) dirScore.SELL += 2;
-  else if (rsiBear || macdBear) dirScore.SELL += 1;
-
-  // ZONE vote
-  if (hasBuyZone) dirScore.BUY += 1.5;
-  if (hasSellZone) dirScore.SELL += 1.5;
-
-  // SWEEP vote (strong reversal signal)
-  if (hasBullSweep) dirScore.BUY += 2;
-  if (hasBearSweep) dirScore.SELL += 2;
-
-  // STRUCTURE vote
-  if (bosBull || mssBull) dirScore.BUY += 1.5;
-  if (bosBear || mssBear) dirScore.SELL += 1.5;
-
-  if (dirScore.BUY > dirScore.SELL) dir = 'BUY';
-  else if (dirScore.SELL > dirScore.BUY) dir = 'SELL';
-
-  // RSI extreme override (counter-trend reversal)
-  if (rsiExtreme) {
-    if (rsi < 30 && inDiscount) dir = 'BUY';
-    if (rsi > 70 && inPremium) dir = 'SELL';
+  for (let i = 1; i < swingLows.length; i++) {
+    if (swingLows[i].price > swingLows[i-1].price) higherLows++;
+    else lowerLows++;
   }
 
-  // Min threshold
-  const MIN_CONFLUENCE = 3;
-  const passed = strongCount >= MIN_CONFLUENCE || totalScore >= 3.5;
+  const bullScore = higherHighs + higherLows;
+  const bearScore = lowerHighs + lowerLows;
 
-  // Confidence
-  let confidence;
-  if (strongCount >= 6) confidence = 95;
-  else if (strongCount === 5) confidence = 85;
-  else if (strongCount === 4) confidence = 75;
-  else if (totalScore >= 3.5) confidence = 60;
-  else if (totalScore >= 3) confidence = 45;
-  else confidence = 0;
+  let trend = 'RANGING';
+  let structure = 'NONE';
+  let lastSwing = null;
 
-  // Grade
-  let grade = 'NO SETUP';
-  if (strongCount >= 6) grade = '🏆 SNIPER (A++)';
-  else if (strongCount === 5) grade = '💎 EXCELLENT (A+)';
-  else if (strongCount === 4) grade = '✅ GOOD (A)';
-  else if (totalScore >= 3.5) grade = '🟡 FAIR (B)';
-  else if (totalScore >= 3) grade = '🟠 WEAK (C)';
+  if (bullScore > bearScore + 1) {
+    trend = 'BULLISH';
+    structure = last.close > (swingHighs[swingHighs.length-1]?.price || Infinity) ? 'BOS' : 'HIGHER_HIGHS_LOWS';
+    lastSwing = swingHighs[swingHighs.length-1] || null;
+  } else if (bearScore > bullScore + 1) {
+    trend = 'BEARISH';
+    structure = last.close < (swingLows[swingLows.length-1]?.price || 0) ? 'BOS' : 'LOWER_HIGHS_LOWS';
+    lastSwing = swingLows[swingLows.length-1] || null;
+  }
 
-  // Zone & SL/TP
-  const isBuy = dir === 'BUY';
-  const zone = dir ? findEntryZone(ictA, isBuy, price) : null;
-  let sltp = null;
-  if (zone) sltp = calcSLTPFromZone(zone, isBuy, mode);
+  return { trend, structure, lastSwing, swingHighs, swingLows };
+}
+
+// Premium/Discount + Fibonacci
+function calcPremiumDiscount(candles) {
+  if (!candles || candles.length < 5) return null;
+  const last = candles[candles.length - 1];
+  const lookback = candles.slice(-50);
+  const swingHigh = Math.max(...lookback.map(c => c.high));
+  const swingLow = Math.min(...lookback.map(c => c.low));
+  const range = swingHigh - swingLow;
+  const eq = (swingHigh + swingLow) / 2;
+
+  // Fibonacci golden zone: 61.8% - 79% (untuk entry di discount buy / premium sell)
+  const fib618 = swingLow + range * 0.618;
+  const fib705 = swingLow + range * 0.705;
+  const fib79 = swingLow + range * 0.79;
+
+  const isPremium = last.close > eq;
+  const inGoldenZone = isPremium
+    ? (last.close >= fib705 && last.close <= fib79)  // premium golden zone (sell area)
+    : (last.close >= fib618 && last.close <= fib705); // discount golden zone (buy area)
 
   return {
-    ok: passed && dir && zone,
-    grade,
-    confidence,
-    dir,
-    confluences,
-    strongCount,
-    weakCount,
-    totalScore,
-    zone,
-    sltp,
-    ta,
-    ictA,
-    session,
-    price,
-    rsi,
-    macdH,
-    trendDir,
-    inDiscount,
-    inPremium,
-    mode
+    swingHigh, swingLow, eq, range,
+    fib618, fib705, fib79,
+    isPremium, inGoldenZone,
+    zone: isPremium ? 'PREMIUM' : 'DISCOUNT'
+  };
+}
+
+// Deteksi sweep
+function detectSweeps(candles) {
+  if (!candles || candles.length < 20) return [];
+  const recent = candles.slice(-30);
+  const last = recent[recent.length - 1];
+  const lookback = recent.slice(0, -1);
+
+  const swingHighs = [];
+  const swingLows = [];
+  for (let i = 2; i < lookback.length - 2; i++) {
+    if (lookback[i].high > lookback[i-1].high && lookback[i].high > lookback[i+1].high) {
+      swingHighs.push(lookback[i].high);
+    }
+    if (lookback[i].low < lookback[i-1].low && lookback[i].low < lookback[i+1].low) {
+      swingLows.push(lookback[i].low);
+    }
+  }
+
+  const sweeps = [];
+  // Bearish sweep: high tembus swing high, close di bawah (rejection → buy signal)
+  for (const sh of swingHighs) {
+    if (last.high > sh && last.close < sh) {
+      sweeps.push({ type: 'BEARISH_SWEEP', level: sh, dir: 'BULL', rejection: true });
+      break;
+    }
+  }
+  // Bullish sweep: low tembus swing low, close di atas (rejection → sell signal)
+  for (const sl of swingLows) {
+    if (last.low < sl && last.close > sl) {
+      sweeps.push({ type: 'BULLISH_SWEEP', level: sl, dir: 'BEAR', rejection: true });
+      break;
+    }
+  }
+  return sweeps;
+}
+
+// Session check (WIB = UTC+7)
+function getSession() {
+  const h = new Date().getUTCHours() + 7; // WIB
+  const hMod = ((h % 24) + 24) % 24;
+  if (hMod >= 14 && hMod < 17) return { name: 'London Open', emoji: '🇬🇧', inKillzone: true, wib: `${hMod}:00` };
+  if (hMod >= 19.5 && hMod < 22) return { name: 'New York Open', emoji: '🇺🇸', inKillzone: true, wib: `${Math.floor(hMod)}:${hMod % 1 ? '30' : '00'}` };
+  if (hMod >= 6 && hMod < 14) return { name: 'Asia', emoji: '🌏', inKillzone: false, wib: `${hMod}:00` };
+  return { name: 'Off-hours', emoji: '⏸', inKillzone: false, wib: `${hMod}:00` };
+}
+
+// ======================================================
+//  ANALISIS UTAMA
+// ======================================================
+async function fullAnalysis(execTF, mode) {
+  // Mapping TF
+  const tfMap = { '1m': '1min', '5m': '5min', '15m': '15min', '30m': '30min', '1h': '1h', '4h': '4h', '1day': '1day' };
+  const tfInternal = tfMap[execTF] || '15min';
+
+  // Pilih HTF bias & mid TF berdasarkan mode
+  let htfTF, midTF;
+  if (mode === 'scalping') { htfTF = '1h'; midTF = '15min'; }
+  else if (mode === 'intraday') { htfTF = '4h'; midTF = '1h'; }
+  else { htfTF = '1day'; midTF = '4h'; }
+
+  // Fetch parallel
+  const [htf, mid, ltf, ta] = await Promise.all([
+    getCandles(htfTF, 200),
+    getCandles(midTF, 200),
+    getCandles(tfInternal, 200),
+    xauusdTA.analyze(true)
+  ]);
+
+  if (!htf.length || !mid.length || !ltf.length) {
+    throw new Error('Data tidak cukup');
+  }
+
+  // 1. HTF BIAS
+  const htfStruct = detectStructure(htf);
+  const htfPD = calcPremiumDiscount(htf);
+  const htfBias = htfStruct.trend; // BULLISH / BEARISH / RANGING
+  const htfZone = htfPD ? htfPD.zone : 'UNKNOWN';
+
+  // 2. MID TF: cari zone (OB / FVG)
+  const ictA = ict.analyze(mid, { lookback: 80 });
+  const lastLtf = ltf[ltf.length - 1].close;
+
+  // Pilih zone searah HTF bias
+  let zoneInfo = null;
+  let zoneType = 'NONE';
+  const buySignal = htfBias === 'BULLISH';
+  const sellSignal = htfBias === 'BEARISH';
+
+  if (buySignal || htfBias === 'RANGING') {
+    // Cari BULLISH OB di bawah harga
+    const buyOB = (ictA.orderBlocks || []).find(o => o.type === 'BULLISH_OB' && o.high < lastLtf);
+    const buyFVG = (ictA.fvgs || []).find(f => f.type === 'BULLISH_FVG' && f.high < lastLtf);
+    if (buyOB) { zoneInfo = buyOB; zoneType = 'BULLISH_OB'; }
+    else if (buyFVG) { zoneInfo = buyFVG; zoneType = 'BULLISH_FVG'; }
+  }
+  if (sellSignal || (htfBias === 'RANGING' && !zoneInfo)) {
+    const sellOB = (ictA.orderBlocks || []).find(o => o.type === 'BEARISH_OB' && o.low > lastLtf);
+    const sellFVG = (ictA.fvgs || []).find(f => f.type === 'BEARISH_FVG' && f.low > lastLtf);
+    if (sellOB) { zoneInfo = sellOB; zoneType = 'BEARISH_OB'; }
+    else if (sellFVG) { zoneInfo = sellFVG; zoneType = 'BEARISH_FVG'; }
+  }
+
+  // 3. LTF: deteksi sweep
+  const ltfSweeps = detectSweeps(ltf);
+  const ltfStruct = detectStructure(ltf);
+
+  // 4. Entry direction
+  const direction = zoneInfo
+    ? (zoneType.startsWith('BULLISH') ? 'BUY' : 'SELL')
+    : (htfBias === 'BULLISH' ? 'BUY' : htfBias === 'BEARISH' ? 'SELL' : 'NONE');
+
+  // 5. Entry, SL, TP
+  let entry, sl, tp1, tp2, slPips, tp1Pips, tp2Pips;
+  if (zoneInfo) {
+    entry = zoneInfo.midpoint || zoneInfo.price;
+    if (direction === 'BUY') {
+      sl = zoneInfo.low - 0.50; // 50 pips di bawah zone
+      const slDist = entry - sl;
+      tp1 = entry + slDist * 1.5; // RR 1:1.5
+      tp2 = entry + slDist * 2.5; // RR 1:2.5
+    } else {
+      sl = zoneInfo.high + 0.50;
+      const slDist = sl - entry;
+      tp1 = entry - slDist * 1.5;
+      tp2 = entry - slDist * 2.5;
+    }
+  } else {
+    // Fallback: pakai current price
+    entry = lastLtf;
+    if (direction === 'BUY') {
+      sl = entry - 0.50;
+      tp1 = entry + 0.75;
+      tp2 = entry + 1.25;
+    } else {
+      sl = entry + 0.50;
+      tp1 = entry - 0.75;
+      tp2 = entry - 1.25;
+    }
+  }
+
+  slPips = Math.round(Math.abs(entry - sl) / 0.01);
+  tp1Pips = Math.round(Math.abs(tp1 - entry) / 0.01);
+  tp2Pips = Math.round(Math.abs(tp2 - entry) / 0.01);
+
+  // 6. CONFLUENCE SCORING
+  const confluence = {
+    ictStructure: htfStruct.structure !== 'NONE' && htfStruct.structure !== 'HIGHER_HIGHS_LOWS' && htfStruct.structure !== 'LOWER_HIGHS_LOWS' ? true : (htfStruct.structure === 'HIGHER_HIGHS_LOWS' || htfStruct.structure === 'LOWER_HIGHS_LOWS'),
+    supplyDemand: htfPD && htfPD.inGoldenZone,
+    killzone: getSession().inKillzone,
+    fibonacci: htfPD && htfPD.inGoldenZone,
+    momentum: ta.ok && ta.indicators && (
+      (direction === 'BUY' && ta.indicators.rsi > 30 && ta.indicators.rsi < 70) ||
+      (direction === 'SELL' && ta.indicators.rsi > 30 && ta.indicators.rsi < 70)
+    )
+  };
+
+  const score = Object.values(confluence).filter(Boolean).length;
+  let probability;
+  if (score >= 5) probability = 'High Probability';
+  else if (score >= 3) probability = 'Medium Probability';
+  else probability = 'Low Probability';
+
+  // 7. Invalidation level
+  let invalidation;
+  if (zoneInfo) {
+    invalidation = direction === 'BUY' ? zoneInfo.low - 0.30 : zoneInfo.high + 0.30;
+  } else {
+    invalidation = direction === 'BUY' ? lastLtf - 0.80 : lastLtf + 0.80;
+  }
+
+  // 8. Waktu WIB
+  const now = new Date();
+  const wib = new Date(now.getTime() + 7 * 60 * 60 * 1000);
+  const wibStr = wib.toLocaleString('id-ID', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+
+  return {
+    execTF, mode, direction,
+    entry, sl, tp1, tp2, slPips, tp1Pips, tp2Pips,
+    zoneInfo, zoneType,
+    htfBias, htfStruct, htfPD, htfZone,
+    midTF, htfTF,
+    ltfSweeps, ltfStruct,
+    confluence, score, probability,
+    invalidation, wibStr,
+    lastLtf,
+    ta
   };
 }
 
 // ======================================================
-//  WELCOME & BASIC COMMANDS
+//  FORMAT OUTPUT
+// ======================================================
+function formatAnalysis(a) {
+  const tfLabel = { '1m': 'M1', '5m': 'M5', '15m': 'M15', '30m': 'M30', '1h': 'H1', '4h': 'H4', '1day': 'D1' }[a.execTF];
+  const em = a.direction === 'BUY' ? '🟢' : a.direction === 'SELL' ? '🔴' : '⚪';
+
+  const lines = [];
+  lines.push(`📊 *XAUUSD ANALYSIS* — Mode: ${a.mode.toUpperCase()}`);
+  lines.push(`🕒 Timeframe Acuan: *${tfLabel}*`);
+  lines.push(`📅 Waktu Analisa: ${a.wibStr} WIB`);
+  lines.push('');
+
+  // HTF BIAS
+  const biasEmoji = a.htfBias === 'BULLISH' ? '🟢' : a.htfBias === 'BEARISH' ? '🔴' : '🟡';
+  lines.push(`🔎 *HTF BIAS (${a.htfTF}):* ${biasEmoji} ${a.htfBias}`);
+  lines.push(`   Struktur: ${a.htfStruct.structure}${a.htfStruct.lastSwing ? ' di level ' + fmt(a.htfStruct.lastSwing.price) : ''}`);
+  lines.push(`   Zona: ${a.htfZone}`);
+  lines.push('');
+
+  // ZONA ENTRY
+  if (a.zoneInfo) {
+    const zLow = fmt(a.zoneInfo.low);
+    const zHigh = fmt(a.zoneInfo.high);
+    lines.push(`📍 *ZONA ENTRY*`);
+    lines.push(`   Tipe: ${a.zoneType}`);
+    lines.push(`   Range: ${zLow} – ${zHigh}`);
+    lines.push(`   Timeframe konfirmasi: ${a.midTF}`);
+  } else {
+    lines.push(`📍 *ZONA ENTRY*`);
+    lines.push(`   ⚠️ Tidak ada OB/FVG searah bias, fallback ke current price`);
+  }
+  lines.push('');
+
+  // SKENARIO TRADE
+  if (a.direction !== 'NONE') {
+    lines.push(`🎯 *SKENARIO TRADE*`);
+    lines.push(`   Arah: ${em} *${a.direction}*`);
+    lines.push(`   Entry: ${fmt(a.entry)}`);
+    lines.push(`   Stop Loss: ${fmt(a.sl)} (≈ ${a.slPips} pips)`);
+    lines.push(`   Take Profit 1: ${fmt(a.tp1)} (RR 1:1.5)`);
+    lines.push(`   Take Profit 2: ${fmt(a.tp2)} (RR 1:2.5)`);
+    const rr = a.tp2Pips / Math.max(1, a.slPips);
+    lines.push(`   Risk : Reward: 1:${fmt(rr, 2)}`);
+  } else {
+    lines.push(`🎯 *SKENARIO TRADE*`);
+    lines.push(`   ⚠️ Tidak ada arah jelas, bias ranging. Tunggu konfirmasi.`);
+  }
+  lines.push('');
+
+  // CONFLUENCE
+  const c = a.confluence;
+  lines.push(`✅ *KONFLUENSI TERPENUHI:*`);
+  lines.push(`   ${c.ictStructure ? '✅' : '❌'} ICT/SMC Structure (OB/FVG/Liquidity Sweep)`);
+  lines.push(`   ${c.supplyDemand ? '✅' : '❌'} Supply/Demand Zone`);
+  lines.push(`   ${c.killzone ? '✅' : '❌'} Killzone Session Timing`);
+  lines.push(`   ${c.fibonacci ? '✅' : '❌'} Fibonacci Golden Zone`);
+  lines.push(`   ${c.momentum ? '✅' : '❌'} Momentum/Volume Confirmation`);
+  lines.push(`   *Skor: ${a.score}/5 = ${a.probability}*`);
+  lines.push('');
+
+  // RISK NOTE
+  lines.push(`⚠️ *CATATAN RISIKO:*`);
+  lines.push(`   • Perhatikan jadwal rilis berita high impact hari ini.`);
+  lines.push(`   • Ini analisa probabilistik, bukan sinyal pasti profit.`);
+  lines.push(`   • Gunakan money management, risk per trade 1–2% modal.`);
+  lines.push('');
+
+  // INVALIDATION
+  lines.push(`🔁 *INVALIDASI SETUP:*`);
+  lines.push(`   Jika harga menembus ${fmt(a.invalidation)} sebelum entry aktif, setup dianggap batal.`);
+  lines.push('');
+
+  lines.push(`⚠️ Disclaimer: Analisa ini bersifat edukasi dan bukan nasihat keuangan atau ajakan trading. Trading forex/gold mengandung risiko tinggi, termasuk risiko kehilangan modal. Gunakan manajemen risiko yang tepat.`);
+
+  return lines.join('\n');
+}
+
+// ======================================================
+//  COMMANDS
 // ======================================================
 const WELCOME = (n) => `Halo ${n}! 👋
 
-*🏆 XAU/USD PRO ANALYST*
+*🏆 XAUUSD ICT/SMC Analyst*
 
-Bot ini menganalisa XAU/USD dengan logika trader profesional:
-- Minimal 3 konfirmasi dari 7 indikator
-- SL 50 pips dari zone (R:R 1:3)
-- Limit/Market order sesuai zone
+Bot analisa teknikal XAUUSD berbasis ICT/SMC + 5 konfluensi.
 
-🎯 *MODE:* ${MODES[currentMode].emoji} ${MODES[currentMode].label}
+📊 *CARA PAKAI:*
+/xauusd — Mulai analisa (pilih TF & mode)
+/help — Bantuan
+/status — Status bot & session
+/cancel — Batalkan analisa
 
-📊 *COMMAND:*
-/signal — Full pro analysis
-/analyze — Detail 7 confluence + score
-/scalp — Mode SCALPING
-/intra — Mode INTRADAY
-/swing — Mode SWING
-/grade — Cek grade kriteria signal
-/bias — Multi-TF trend
-/zones — ICT zones
-/sweep — Liquidity sweep
-/ot — Optimal entry
-/m1 /m2 /m3 /m5 /m15 — Detail TF
-/status — Uptime
-
-⚠️ _Bukan saran finansial. Selalu pakai MM._`;
+⚠️ _Bukan saran finansial. Gunakan MM._`;
 
 bot.onText(/^\/start$/, (m) => {
   bot.sendMessage(m.chat.id, WELCOME(m.from.first_name || 'Trader'), { parse_mode: 'Markdown' });
   logger.info('User: ' + m.from.first_name);
 });
+
 bot.onText(/^\/help$/, (m) => {
   bot.sendMessage(m.chat.id, WELCOME(m.from.first_name || 'Trader'), { parse_mode: 'Markdown' });
+});
+
+bot.onText(/^\/cancel$/, (m) => {
+  clearState(m.chat.id);
+  bot.sendMessage(m.chat.id, '❌ Analisa dibatalkan.');
 });
 
 const bootTime = Date.now();
@@ -392,387 +497,101 @@ bot.onText(/^\/status$/, (m) => {
   const s = up % 60;
   const sess = getSession();
   bot.sendMessage(m.chat.id,
-    '🟢 *PRO STATUS*\n' +
+    `🟢 *STATUS*\n` +
     `⏱ ${h}h ${min}m ${s}s\n` +
-    `📡 Yahoo (primary) + TD (backup): ${TD_KEY ? '✅' : '🟡 (no backup)'}\n` +
-    `🎯 Mode: ${MODES[currentMode].emoji} ${MODES[currentMode].label}\n` +
-    `🌐 Session: ${sess.emoji} ${sess.name} (${sess.quality})`,
+    `📡 Yahoo+TD: ${TD_KEY ? '✅' : '🟡'}\n` +
+    `🌐 Session: ${sess.emoji} ${sess.name} (${sess.wib} WIB)\n` +
+    `⚡ Killzone: ${sess.inKillzone ? 'YA ✅' : 'TIDAK ❌'}`,
     { parse_mode: 'Markdown' }
   );
 });
 
-// ======================================================
-//  MODE SET
-// ======================================================
-function setMode(m, name) {
+// /xauusd — mulai flow interaktif
+bot.onText(/^\/xauusd$/, (m) => {
   const cid = m.chat.id;
-  const mode = MODES[name];
-  if (!mode) return;
-  currentMode = name;
-  const slPips = mode.slPipsFromZone;
-  const tpPips = slPips * mode.tpMultiplier;
+  if (!limiter.checkLimit('/xauusd')) return bot.sendMessage(cid, '⏳ Tunggu sebentar...');
+  setState(cid, { step: 'tf' });
   bot.sendMessage(cid,
-    `${mode.emoji} *MODE: ${mode.label}*\n` +
-    `⏱ ${mode.timeInTrade}\n` +
-    `🛑 SL: ${slPips} pips dari zone\n` +
-    `🎯 TP: ${tpPips} pips (1:${mode.tpMultiplier})\n` +
-    `📊 TF: ${mode.tfs.bias} → ${mode.tfs.confirm} → ${mode.tfs.entry}`,
-    { parse_mode: 'Markdown' });
-}
-bot.onText(/^\/(scalp|scalping)$/, (m) => setMode(m, 'scalping'));
-bot.onText(/^\/(intra|intraday)$/, (m) => setMode(m, 'intraday'));
-bot.onText(/^\/swing$/, (m) => setMode(m, 'swing'));
-
-// ======================================================
-//  /signal — Pro signal
-// ======================================================
-bot.onText(/^\/(signal|xauusd)$/, async (m) => {
-  const cid = m.chat.id;
-  if (!limiter.checkLimit('/signal')) return bot.sendMessage(cid, '⏳ Tunggu...');
-
-  const mode = getMode();
-  const loading = await bot.sendMessage(cid, `⏳ Pro analysis XAU/USD (${mode.label})...`);
-  try {
-    const r = await proAnalyze();
-    if (r.error) return bot.editMessageText('❌ ' + r.error, { chat_id: cid, message_id: loading.message_id });
-
-    if (!r.ok) {
-      // Tampilkan hasil meski NO SETUP biar user tau
-      const confLines = r.confluences.map(c => {
-        const em = c.score === 'STRONG' ? '✅' : c.score === 'WEAK' ? '🟡' : '❌';
-        return `${em} ${c.name}: ${c.score}`;
-      }).join('\n');
-      return bot.editMessageText(
-        `⚪ *NO SETUP — ${r.grade}*\n` +
-        `💰 Price: $${fmt(r.price)}\n` +
-        `🌐 Session: ${r.session.emoji} ${r.session.name}\n` +
-        `📊 Strong: ${r.strongCount}/7 | Total: ${r.totalScore.toFixed(1)}\n\n` +
-        `━━━ CONFLUENCES ━━━\n${confLines}\n\n` +
-        `⏸ Tunggu ${3 - r.strongCount} konfirmasi lagi. Patience is key.`,
-        { chat_id: cid, message_id: loading.message_id, parse_mode: 'Markdown' }
-      );
-    }
-
-    const isBuy = r.dir === 'BUY';
-    const emoji = isBuy ? '🟢' : '🔴';
-    const dirText = isBuy ? 'BUY' : 'SELL';
-    const slDist = r.sltp.slDist;
-    const tpDist = r.sltp.tpDist;
-    const slPips = Math.round(slDist / 0.01);
-    const tpPips = Math.round(tpDist / 0.01);
-    const rr = tpDist / Math.max(0.01, slDist);
-    const distToEntry = Math.abs(r.price - r.sltp.entry);
-    const orderType = distToEntry > 0.5 ? 'LIMIT' : 'MARKET';
-
-    const confLines = r.confluences.map(c => {
-      const em = c.score === 'STRONG' ? '✅' : c.score === 'WEAK' ? '🟡' : '❌';
-      return `${em} ${c.name}: ${c.score}`;
-    }).join('\n');
-
-    const lines = [];
-    lines.push(`${emoji} *XAU/USD ${dirText} — ${r.grade}*`);
-    lines.push(`💰 Price: $${fmt(r.price)} | ${mode.emoji} ${mode.label}`);
-    lines.push(`🎯 Confidence: *${r.confidence}%* | Strong: ${r.strongCount}/7`);
-    lines.push(`🌐 Session: ${r.session.emoji} ${r.session.name}`);
-    lines.push('');
-    lines.push('━━━ CONFLUENCE ━━━');
-    lines.push(confLines);
-    lines.push('');
-    lines.push('━━━ ORDER ━━━');
-    lines.push(`📥 *${orderType} ${dirText}:* $${fmt(r.sltp.entry)}`);
-    lines.push(`📦 Zone: ${r.zone.type} $${fmt(r.zone.low)}—$${fmt(r.zone.high)}`);
-    lines.push('');
-    lines.push('━━━ PLAN ━━━');
-    lines.push(`🎯 TP: *$${fmt(r.sltp.tp)}* (${tpPips} pips)`);
-    lines.push(`🛑 SL: *$${fmt(r.sltp.sl)}* (${slPips} pips dari zone)`);
-    lines.push(`📏 R:R = 1:${fmt(rr, 2)}`);
-    lines.push('');
-    lines.push('━━━ MARKET STATE ━━━');
-    lines.push(`📈 Trend: ${r.trendDir}`);
-    lines.push(`📊 RSI: ${fmt(r.rsi, 1)} | MACD-h: ${fmt(r.macdH, 3)}`);
-    lines.push(`📍 Zone: ${r.inDiscount ? 'DISCOUNT ✅' : r.inPremium ? 'PREMIUM ✅' : 'EQ (kurang ideal)'}`);
-    lines.push('');
-    lines.push('⚠️ _Pro analysis. Selalu pakai MM. Bukan saran finansial._');
-
-    bot.editMessageText(lines.join('\n'), {
-      chat_id: cid, message_id: loading.message_id, parse_mode: 'Markdown'
-    });
-  } catch (e) {
-    logger.error('/signal err: ' + e.message);
-    bot.editMessageText('❌ ' + e.message, { chat_id: cid, message_id: loading.message_id });
-  }
+    `📊 *XAUUSD ANALYSIS*\n\nPilih *Timeframe* eksekusi:`,
+    { parse_mode: 'Markdown', ...TF_KEYBOARD }
+  );
 });
 
 // ======================================================
-//  /analyze — Detail 7 confluence breakdown
+//  CALLBACK HANDLER (tombol inline)
 // ======================================================
-bot.onText(/^\/analyze$/, async (m) => {
-  const cid = m.chat.id;
-  if (!limiter.checkLimit('/analyze')) return bot.sendMessage(cid, '⏳ Tunggu...');
+bot.on('callback_query', async (q) => {
+  const cid = q.message.chat.id;
+  const data = q.data;
+  const st = getState(cid);
 
-  const loading = await bot.sendMessage(cid, '⏳ Deep analysis XAU/USD...');
-  try {
-    const r = await proAnalyze();
-    if (r.error) return bot.editMessageText('❌ ' + r.error, { chat_id: cid, message_id: loading.message_id });
-
-    const lines = [];
-    lines.push('🔬 *DEEP ANALYSIS XAU/USD*');
-    lines.push(`💰 $${fmt(r.price)} | ${r.session.emoji} ${r.session.name}`);
-    lines.push('');
-    lines.push('━━━ 7 CONFLUENCE BREAKDOWN ━━━');
-
-    r.confluences.forEach((c, i) => {
-      const em = c.score === 'STRONG' ? '✅' : c.score === 'WEAK' ? '🟡' : '❌';
-      const pct = c.score === 'STRONG' ? '+2' : c.score === 'WEAK' ? '+1' : '+0';
-      lines.push(`${i+1}. ${em} *${c.name}* (${c.score}) [${pct}]`);
-    });
-
-    lines.push('');
-    lines.push(`📊 *Total Score: ${r.totalScore.toFixed(1)}/7*`);
-    lines.push(`   Strong: ${r.strongCount} | Weak: ${r.weakCount}`);
-    lines.push(`🎯 *Grade: ${r.grade}*`);
-    lines.push('');
-    if (r.dir) {
-      lines.push(`📍 *Direction: ${r.dir}*`);
-      if (r.zone) {
-        lines.push(`📦 *Entry Zone: ${r.zone.type}*`);
-        lines.push(`   $${fmt(r.zone.low)} — $${fmt(r.zone.high)} (mid $${fmt(r.zone.price)})`);
-      }
-    } else {
-      lines.push('⏸ *Direction: UNCLEAR* (mixed signals)');
-    }
-
-    lines.push('');
-    lines.push('━━━ MARKET STATE ━━━');
-    lines.push(`📈 Trend (H1): ${r.trendDir}`);
-    lines.push(`📊 RSI: ${fmt(r.rsi, 1)} | MACD-h: ${fmt(r.macdH, 3)}`);
-    lines.push(`📍 Zone: ${r.inDiscount ? 'DISCOUNT' : r.inPremium ? 'PREMIUM' : 'EQUILIBRIUM'}`);
-
-    bot.editMessageText(lines.join('\n'), {
-      chat_id: cid, message_id: loading.message_id, parse_mode: 'Markdown'
-    });
-  } catch (e) {
-    bot.editMessageText('❌ ' + e.message, { chat_id: cid, message_id: loading.message_id });
+  if (data === 'cancel') {
+    clearState(cid);
+    await bot.answerCallbackQuery(q.id, { text: 'Cancelled' });
+    return bot.editMessageText('❌ Analisa dibatalkan.', { chat_id: cid, message_id: q.message.message_id });
   }
-});
 
-// ======================================================
-//  /grade — Cek apa signal saat ini layak entry
-// ======================================================
-bot.onText(/^\/grade$/, async (m) => {
-  const cid = m.chat.id;
-  if (!limiter.checkLimit('/grade')) return bot.sendMessage(cid, '⏳ Tunggu...');
-
-  const loading = await bot.sendMessage(cid, '⏳ Grading current setup...');
-  try {
-    const r = await proAnalyze();
-    if (r.error) return bot.editMessageText('❌ ' + r.error, { chat_id: cid, message_id: loading.message_id });
-
-    let recommendation;
-    if (r.strongCount >= 5) recommendation = '✅ ENTRY — High probability setup';
-    else if (r.strongCount === 4) recommendation = '🟡 ENTRY WITH CAUTION — Solid tapi bisa gagal';
-    else if (r.totalScore >= 3.5) recommendation = '⚠️ WAIT — Setup belum konfluen';
-    else if (r.totalScore >= 3) recommendation = '🛑 STAND ASIDE — Sinyal lemah';
-    else recommendation = '❌ NO TRADE — Tidak ada setup valid';
-
-    const gradeEmoji = r.strongCount >= 5 ? '🟢' : r.strongCount >= 4 ? '🟡' : r.strongCount >= 3 ? '🟠' : '🔴';
-
-    bot.editMessageText(
-      `${gradeEmoji} *SIGNAL GRADE*\n\n` +
-      `Grade: *${r.grade}*\n` +
-      `Score: ${r.totalScore.toFixed(1)}/7 (${r.strongCount} strong)\n` +
-      `Direction: ${r.dir || 'UNCLEAR'}\n` +
-      `Session: ${r.session.emoji} ${r.session.name}\n\n` +
-      `*Rekomendasi:*\n${recommendation}\n\n` +
-      `Kirim /signal untuk detail lengkap.`,
-      { chat_id: cid, message_id: loading.message_id, parse_mode: 'Markdown' }
+  if (data === 'back_tf') {
+    setState(cid, { step: 'tf' });
+    await bot.answerCallbackQuery(q.id);
+    return bot.editMessageText(
+      `📊 *XAUUSD ANALYSIS*\n\nPilih *Timeframe* eksekusi:`,
+      { chat_id: cid, message_id: q.message.message_id, parse_mode: 'Markdown', ...TF_KEYBOARD }
     );
-  } catch (e) {
-    bot.editMessageText('❌ ' + e.message, { chat_id: cid, message_id: loading.message_id });
   }
-});
 
-// ======================================================
-//  /bias — Multi-TF trend
-// ======================================================
-bot.onText(/^\/bias$/, async (m) => {
-  const cid = m.chat.id;
-  if (!limiter.checkLimit('/bias')) return bot.sendMessage(cid, '⏳ Tunggu...');
-  const loading = await bot.sendMessage(cid, '⏳ Cek bias...');
-  try {
-    const tfs = ['4h', '1h', '15m', '5m'];
-    const labels = { '4h': 'H4', '1h': 'H1', '15m': 'M15', '5m': 'M5' };
-    const lines = ['🎯 *BIAS XAU/USD*', ''];
-    let bull = 0, total = 0;
-
-    for (const tf of tfs) {
-      const d = await getCandles(tf, 100);
-      if (!d || d.length < 30) { lines.push(`${labels[tf]}: ❌`); continue; }
-      const closes = d.map(c => c.close);
-      const sma7 = closes.slice(-7).reduce((a, b) => a + b, 0) / 7;
-      const sma21 = closes.slice(-21).reduce((a, b) => a + b, 0) / 21;
-      const last = closes[closes.length - 1];
-      let dir = 'SIDE', em = '⚪';
-      if (sma7 > sma21 && last > sma7) { dir = 'BULL'; em = '🟢'; bull++; total++; }
-      else if (sma7 < sma21 && last < sma7) { dir = 'BEAR'; em = '🔴'; total++; }
-      else if (sma7 > sma21) { dir = 'PB↑'; em = '🟡'; total++; bull += 0.5; }
-      else if (sma7 < sma21) { dir = 'PB↓'; em = '🟠'; total++; }
-      lines.push(`${em} *${labels[tf]}:* ${dir}`);
-    }
-    lines.push('');
-    if (total > 0 && bull / total >= 0.7) lines.push('📈 *CONFLUENCE: BULLISH*');
-    else if (total > 0 && bull / total <= 0.3) lines.push('📉 *CONFLUENCE: BEARISH*');
-    else lines.push('⚖️ *CONFLUENCE: MIXED*');
-
-    bot.editMessageText(lines.join('\n'), { chat_id: cid, message_id: loading.message_id, parse_mode: 'Markdown' });
-  } catch (e) {
-    bot.editMessageText('❌ ' + e.message, { chat_id: cid, message_id: loading.message_id });
+  // Step 1: Pilih TF
+  if (data.startsWith('tf_') && st.step === 'tf') {
+    const tf = data.replace('tf_', '');
+    setState(cid, { step: 'mode', tf });
+    const tfLabel = { '1m': 'M1', '5m': 'M5', '15m': 'M15', '30m': 'M30', '1h': 'H1', '4h': 'H4', '1day': 'D1' }[tf];
+    await bot.answerCallbackQuery(q.id, { text: `TF: ${tfLabel}` });
+    return bot.editMessageText(
+      `📊 *XAUUSD ANALYSIS*\n\nTF: *${tfLabel}*\n\nPilih *Mode* trading:`,
+      { chat_id: cid, message_id: q.message.message_id, parse_mode: 'Markdown', ...MODE_KEYBOARD }
+    );
   }
-});
 
-// ======================================================
-//  /zones — ICT zones
-// ======================================================
-bot.onText(/^\/zones$/, async (m) => {
-  const cid = m.chat.id;
-  if (!limiter.checkLimit('/zones')) return bot.sendMessage(cid, '⏳ Tunggu...');
-  const loading = await bot.sendMessage(cid, '⏳ Scan zones...');
-  try {
-    const tf = getMode().tfs.entry;
-    const d = await getCandles(tf, 200);
-    if (!d || d.length < 50) return bot.editMessageText('❌ Data kurang', { chat_id: cid, message_id: loading.message_id });
-    const last = d[d.length - 1].close;
-    const a = ict.analyze(d, { lookback: 80 });
-    const lines = [`🎯 *ZONES XAU/USD* (${tf})`, `💰 $${fmt(last)}`, ''];
-    if (a.premiumDiscount) {
-      const pd = a.premiumDiscount;
-      lines.push('━━━ P/D ━━━');
-      lines.push(`Zone: *${pd.zone}*`);
-      lines.push(`🟢 OTE Buy: $${fmt(pd.oTE_buy)}`);
-      lines.push(`🔴 OTE Sell: $${fmt(pd.oTE_sell)}`);
-      lines.push('');
-    }
-    const ob = (a.orderBlocks || []).filter(o => Math.abs((o.midpoint - last) / last) * 100 < 2).slice(0, 3);
-    if (ob.length) {
-      lines.push('━━━ OB ━━━');
-      for (const o of ob) lines.push(`${o.type === 'BULLISH_OB' ? '🟢' : '🔴'} $${fmt(o.low)}—$${fmt(o.high)}`);
-      lines.push('');
-    }
-    const fv = (a.fvgs || []).filter(f => Math.abs((f.midpoint - last) / last) * 100 < 2).slice(0, 3);
-    if (fv.length) {
-      lines.push('━━━ FVG ━━━');
-      for (const f of fv) lines.push(`${f.type === 'BULLISH_FVG' ? '🟢' : '🔴'} $${fmt(f.low)}—$${fmt(f.high)}`);
-      lines.push('');
-    }
-    if (lines.length <= 3) lines.push('ℹ️ Tidak ada zone dekat harga.');
-    bot.editMessageText(lines.join('\n'), { chat_id: cid, message_id: loading.message_id, parse_mode: 'Markdown' });
-  } catch (e) {
-    bot.editMessageText('❌ ' + e.message, { chat_id: cid, message_id: loading.message_id });
-  }
-});
+  // Step 2: Pilih Mode → generate analisa
+  if (data.startsWith('mode_') && st.step === 'mode') {
+    const mode = data.replace('mode_', '');
+    const tf = st.tf;
+    const tfLabel = { '1m': 'M1', '5m': 'M5', '15m': 'M15', '30m': 'M30', '1h': 'H1', '4h': 'H4', '1day': 'D1' }[tf];
 
-// ======================================================
-//  /sweep — Liquidity sweep
-// ======================================================
-bot.onText(/^\/sweep$/, async (m) => {
-  const cid = m.chat.id;
-  if (!limiter.checkLimit('/sweep')) return bot.sendMessage(cid, '⏳ Tunggu...');
-  const loading = await bot.sendMessage(cid, '⏳ Scan sweep...');
-  try {
-    const lines = ['💧 *LIQUIDITY SWEEP*', ''];
-    for (const tf of ['4h', '1h', '15m']) {
-      const d = await getCandles(tf, 200);
-      if (!d || d.length < 30) continue;
-      const a = ict.analyze(d, { lookback: 50 });
-      if (!a.sweeps || a.sweeps.length === 0) continue;
-      const labels = { '4h': 'H4', '1h': 'H1', '15m': 'M15' };
-      lines.push(`━━━ ${labels[tf]} ━━━`);
-      for (const s of a.sweeps.slice(0, 2)) {
-        const em = s.direction === 'BULLISH' ? '🟢' : '🔴';
-        const rj = s.rejected ? ' ✓rejected' : '';
-        lines.push(`${em} ${s.type} @ $${fmt(s.level)}${rj}`);
+    await bot.answerCallbackQuery(q.id, { text: `Mode: ${mode}` });
+
+    // Tampilkan loading
+    await bot.editMessageText(
+      `⏳ Generating analisa ${tfLabel} ${mode}...`,
+      { chat_id: cid, message_id: q.message.message_id }
+    );
+
+    try {
+      const a = await fullAnalysis(tf, mode);
+      const text = formatAnalysis(a);
+      clearState(cid);
+
+      // Telegram max 4096 chars
+      if (text.length <= 4000) {
+        await bot.editMessageText(text, {
+          chat_id: cid, message_id: q.message.message_id, parse_mode: 'Markdown'
+        });
+      } else {
+        // Split jadi 2 pesan
+        const half = Math.floor(text.length / 2);
+        const splitAt = text.lastIndexOf('\n', half);
+        await bot.editMessageText(text.substring(0, splitAt), {
+          chat_id: cid, message_id: q.message.message_id, parse_mode: 'Markdown'
+        });
+        await bot.sendMessage(cid, text.substring(splitAt), { parse_mode: 'Markdown' });
       }
-      lines.push('');
+    } catch (e) {
+      logger.error('analysis err: ' + e.message);
+      clearState(cid);
+      await bot.editMessageText('❌ Error: ' + e.message, { chat_id: cid, message_id: q.message.message_id });
     }
-    if (lines.length <= 2) lines.push('ℹ️ Tidak ada sweep.');
-    bot.editMessageText(lines.join('\n'), { chat_id: cid, message_id: loading.message_id, parse_mode: 'Markdown' });
-  } catch (e) {
-    bot.editMessageText('❌ ' + e.message, { chat_id: cid, message_id: loading.message_id });
   }
 });
-
-// ======================================================
-//  /ot — Optimal entry
-// ======================================================
-bot.onText(/^\/ot$/, async (m) => {
-  const cid = m.chat.id;
-  if (!limiter.checkLimit('/ot')) return bot.sendMessage(cid, '⏳ Tunggu...');
-  const loading = await bot.sendMessage(cid, '⏳ Hitung OTE...');
-  try {
-    const tf = getMode().tfs.entry;
-    const d = await getCandles(tf, 200);
-    if (!d || d.length < 50) return bot.editMessageText('❌ Data kurang', { chat_id: cid, message_id: loading.message_id });
-    const a = ict.analyze(d, { lookback: 50 });
-    if (!a.premiumDiscount) return bot.editMessageText('❌ Tidak bisa hitung zone', { chat_id: cid, message_id: loading.message_id });
-    const pd = a.premiumDiscount;
-    const lines = [
-      '🎯 *OPTIMAL TRADE ENTRY*',
-      `💰 Last: $${fmt(pd.currentPrice)}`,
-      '',
-      `High: $${fmt(pd.swingHigh)} | Low: $${fmt(pd.swingLow)}`,
-      `EQ: $${fmt(pd.equilibrium)} | Zone: *${pd.zone}*`,
-      '',
-      `🟢 OTE Buy (62%): $${fmt(pd.oTE_buy)}`,
-      `🔴 OTE Sell (79%): $${fmt(pd.oTE_sell)}`
-    ];
-    bot.editMessageText(lines.join('\n'), { chat_id: cid, message_id: loading.message_id, parse_mode: 'Markdown' });
-  } catch (e) {
-    bot.editMessageText('❌ ' + e.message, { chat_id: cid, message_id: loading.message_id });
-  }
-});
-
-// ======================================================
-//  Multi-TF detail handlers
-// ======================================================
-async function detailTF(m, tf) {
-  const cid = m.chat.id;
-  const labels = { '15m': 'M15', '5m': 'M5', '3m': 'M3', '2m': 'M2', '1m': 'M1' };
-  if (!limiter.checkLimit('/' + tf)) return bot.sendMessage(cid, '⏳ Tunggu...');
-  const loading = await bot.sendMessage(cid, `⏳ ${labels[tf]}...`);
-  try {
-    const d = await getCandles(tf, 200);
-    if (!d || d.length < 30) return bot.editMessageText('❌ Data kurang', { chat_id: cid, message_id: loading.message_id });
-    const closes = d.map(c => c.close);
-    const sma7 = closes.slice(-7).reduce((a, b) => a + b, 0) / 7;
-    const sma21 = closes.slice(-21).reduce((a, b) => a + b, 0) / 21;
-    const last = closes[closes.length - 1];
-    const high = Math.max(...d.slice(-7).map(c => c.high));
-    const low = Math.min(...d.slice(-7).map(c => c.low));
-    let trend = 'SIDE', em = '⚪';
-    if (sma7 > sma21 && last > sma7) { trend = 'BULL'; em = '🟢'; }
-    else if (sma7 < sma21 && last < sma7) { trend = 'BEAR'; em = '🔴'; }
-    else if (sma7 > sma21) { trend = 'PB↑'; em = '🟡'; }
-    else if (sma7 < sma21) { trend = 'PB↓'; em = '🟠'; }
-    const a = ict.analyze(d, { lookback: 50 });
-    const lines = [
-      `${em} *XAU/USD — ${labels[tf]}*`,
-      `💰 $${fmt(last)} | Trend: *${trend}*`,
-      `SMA7: $${fmt(sma7)} | SMA21: $${fmt(sma21)}`,
-      `7-bar H: $${fmt(high)} L: $${fmt(low)}`
-    ];
-    if (a.premiumDiscount) {
-      lines.push(`Zone: *${a.premiumDiscount.zone}* | OTE Buy $${fmt(a.premiumDiscount.oTE_buy)} Sell $${fmt(a.premiumDiscount.oTE_sell)}`);
-    }
-    bot.editMessageText(lines.join('\n'), { chat_id: cid, message_id: loading.message_id, parse_mode: 'Markdown' });
-  } catch (e) {
-    bot.editMessageText('❌ ' + e.message, { chat_id: cid, message_id: loading.message_id });
-  }
-}
-bot.onText(/^\/m15$/, (m) => detailTF(m, '15m'));
-bot.onText(/^\/m5$/, (m) => detailTF(m, '5m'));
-bot.onText(/^\/m3$/, (m) => detailTF(m, '3m'));
-bot.onText(/^\/m2$/, (m) => detailTF(m, '2m'));
-bot.onText(/^\/m1$/, (m) => detailTF(m, '1m'));
 
 // ======================================================
 //  Auto-reply
@@ -782,17 +601,17 @@ bot.on('message', (m) => {
   const t = (m.text || '').toLowerCase();
   const n = m.from.first_name || 'Trader';
   let r = '';
-  if (/halo|hai|hello|hi/.test(t)) r = `Halo ${n}! 👋 /signal untuk analisa.`;
-  else if (/signal|analisa|gold|emas|xau/.test(t)) r = `Coba /signal ya ${n} 📊`;
-  else if (/help|bantu/.test(t)) r = 'Ketik /help untuk list command.';
-  else if (t.length > 0) r = `Hai ${n}! Ketik /signal atau /help.`;
+  if (/halo|hai|hello|hi/.test(t)) r = `Halo ${n}! 👋 Ketik /xauusd untuk analisa.`;
+  else if (/analisa|signal|gold|emas|xau/.test(t)) r = `Coba /xauusd ya ${n} 📊`;
+  else if (/help|bantu/.test(t)) r = 'Ketik /help untuk info.';
+  else if (t.length > 0) r = `Hai ${n}! Ketik /xauusd untuk mulai analisa.`;
   if (r) bot.sendMessage(m.chat.id, r);
 });
 
 // ======================================================
-//  Start polling
+//  START
 // ======================================================
-console.log('⏳ Waiting 25s sebelum polling...');
+console.log('⏳ Waiting 25s...');
 setTimeout(() => {
   console.log('✓ Polling started');
   bot.startPolling().catch(e => console.error('startPolling err:', e.message));
