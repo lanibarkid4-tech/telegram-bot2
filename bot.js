@@ -251,12 +251,13 @@ async function fullAnalysis(execTF, mode) {
   else if (mode === 'intraday') { htfTF = '4h'; midTF = '1h'; }
   else { htfTF = '1day'; midTF = '4h'; }
 
-  // Fetch parallel
-  const [htf, mid, ltf, ta] = await Promise.all([
+  // Fetch parallel (termasuk data real-time 1m untuk 24h high/low)
+  const [htf, mid, ltf, ta, realtime1m] = await Promise.all([
     getCandles(htfTF, 200),
     getCandles(midTF, 200),
     getCandles(tfInternal, 200),
-    xauusdTA.analyze(true)
+    xauusdTA.analyze(true),
+    getCandles('1min', 60).catch(() => []) // 60 menit terakhir untuk context
   ]);
 
   if (!htf.length || !mid.length || !ltf.length) {
@@ -278,6 +279,17 @@ async function fullAnalysis(execTF, mode) {
   let zoneType = 'NONE';
   const buySignal = htfBias === 'BULLISH';
   const sellSignal = htfBias === 'BEARISH';
+
+  // 24h stats (real-time) — pakai 1day candle + 1m terakhir
+  const dayCandle = htfTF === '1day' ? htf[htf.length - 1] : null;
+  const day24Candles = ltf.slice(-96); // 96 × 15m = 24 jam, atau 288 × 5m = 24 jam
+  const high24h = day24Candles.length ? Math.max(...day24Candles.map(c => c.high)) : (dayCandle ? dayCandle.high : lastLtf);
+  const low24h = day24Candles.length ? Math.min(...day24Candles.map(c => c.low)) : (dayCandle ? dayCandle.low : lastLtf);
+  // 24h ago price: ambil candle ke-(N-96) atau dari day candle open
+  const open24h = dayCandle ? dayCandle.open : (day24Candles.length > 0 ? day24Candles[0].open : lastLtf);
+  const change24h = lastLtf - open24h;
+  const changePct = open24h ? (change24h / open24h) * 100 : 0;
+  const realtimePrice = realtime1m.length ? realtime1m[realtime1m.length - 1].close : lastLtf;
 
   if (buySignal || htfBias === 'RANGING') {
     // Cari BULLISH OB di bawah harga
@@ -376,6 +388,7 @@ async function fullAnalysis(execTF, mode) {
     confluence, score, probability,
     invalidation, wibStr,
     lastLtf,
+    realtimePrice, high24h, low24h, open24h, change24h, changePct,
     ta
   };
 }
@@ -391,6 +404,18 @@ function formatAnalysis(a) {
   lines.push(`📊 *XAUUSD ANALYSIS* — Mode: ${a.mode.toUpperCase()}`);
   lines.push(`🕒 Timeframe Acuan: *${tfLabel}*`);
   lines.push(`📅 Waktu Analisa: ${a.wibStr} WIB`);
+  lines.push('');
+
+  // REALTIME PRICE INFO
+  const changeSign = a.change24h >= 0 ? '+' : '';
+  const changeEmoji = a.change24h >= 0 ? '📈' : '📉';
+  const distToHigh = ((a.high24h - a.realtimePrice) / a.realtimePrice * 100).toFixed(2);
+  const distToLow = ((a.realtimePrice - a.low24h) / a.realtimePrice * 100).toFixed(2);
+  lines.push(`💰 *HARGA REAL-TIME*`);
+  lines.push(`   XAUUSD: *$${fmt(a.realtimePrice)}*`);
+  lines.push(`   ${changeEmoji} 24h: ${changeSign}${fmt(a.change24h)} (${changeSign}${fmt(a.changePct, 2)}%)`);
+  lines.push(`   📊 24h High: $${fmt(a.high24h)} | Low: $${fmt(a.low24h)}`);
+  lines.push(`   📏 Jarak ke High: ${distToHigh}% | ke Low: ${distToLow}%`);
   lines.push('');
 
   // HTF BIAS
