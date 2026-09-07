@@ -52,9 +52,28 @@ async function getCandles(tf, count = 200) {
   const k = 'c-' + tf + '-' + count;
   let v = cache.get(k);
   if (v) return v;
-  v = await candles.getCandles('xauusd', tf, count);
-  if (v && v.length) cache.set(k, v, 60);
-  return v || [];
+  try {
+    const meta = await candles.getCandlesWithMeta('xauusd', tf, count);
+    if (meta && meta.candles && meta.candles.length) {
+      cache.set(k, meta.candles);
+      // simpan source info di cache terpisah
+      cache.set(k + ':meta', { source: meta.source, symbol: meta.symbol, delay: meta.delay }, 60);
+      return meta.candles;
+    }
+  } catch (e) {
+    // fallback ke function lama (return array plain)
+  }
+  const arr = await candles.getCandles('xauusd', tf, count);
+  if (arr && arr.length) cache.set(k, arr, 60);
+  return arr || [];
+}
+
+function getLastDataSource() {
+  // ambil source dari cache entry terakhir yang masih ada
+  for (const key of Object.keys(cache._s || {})) {
+    if (key.endsWith(':meta')) return cache._s[key].v;
+  }
+  return null;
 }
 
 // ======================================================
@@ -389,6 +408,7 @@ async function fullAnalysis(execTF, mode) {
     invalidation, wibStr,
     lastLtf,
     realtimePrice, high24h, low24h, open24h, change24h, changePct,
+    dataSource: getLastDataSource(),
     ta
   };
 }
@@ -416,6 +436,7 @@ function formatAnalysis(a) {
   lines.push(`   ${changeEmoji} 24h: ${changeSign}${fmt(a.change24h)} (${changeSign}${fmt(a.changePct, 2)}%)`);
   lines.push(`   📊 24h High: $${fmt(a.high24h)} | Low: $${fmt(a.low24h)}`);
   lines.push(`   📏 Jarak ke High: ${distToHigh}% | ke Low: ${distToLow}%`);
+  lines.push(`   📡 Source: ${a.dataSource || 'yahoo-futures'} (~15min delay)`);
   lines.push('');
 
   // HTF BIAS

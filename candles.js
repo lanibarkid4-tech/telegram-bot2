@@ -49,6 +49,8 @@ function num(v) {
 // ======================================================
 //  Symbol mapping per provider
 // ======================================================
+// Primary: SPOT (lebih akurat untuk trading, match dengan broker)
+// Fallback: FUTURES (GC=F) — gap biasanya $0.50-2 dari spot
 const TD_SYMBOLS = {
   xauusd: 'XAU/USD', gold: 'XAU/USD', xau: 'XAU/USD',
   xagusd: 'XAG/USD', silver: 'XAG/USD', xag: 'XAG/USD',
@@ -59,7 +61,19 @@ const TD_SYMBOLS = {
   dxy: 'DXY', nasdaq: 'NDX', spx: 'SPX'
 };
 
-const YH_SYMBOLS = {
+// Yahoo: SPOT primary (`XAU=X`), futures (`GC=F`) sebagai fallback
+const YH_SYMBOLS_PRIMARY = {
+  xauusd: 'XAU=X', gold: 'XAU=X', xau: 'XAU=X',
+  xagusd: 'XAG=X', silver: 'XAG=X', xag: 'XAG=X',
+  eurusd: 'EURUSD=X', gbpusd: 'GBPUSD=X', gbpjpy: 'GBPJPY=X',
+  usdjpy: 'USDJPY=X', audusd: 'AUDUSD=X', nzdusd: 'NZDUSD=X',
+  usdcad: 'USDCAD=X', usdchf: 'USDCHF=X',
+  btcusd: 'BTC-USD', ethusd: 'ETH-USD',
+  dxy: 'DX-Y.NYB', nasdaq: '^NDX', spx: '^GSPC'
+};
+
+// Fallback kalau primary ga ada (misal XAU=X rate-limited)
+const YH_SYMBOLS_FALLBACK = {
   xauusd: 'GC=F', gold: 'GC=F', xau: 'GC=F',
   xagusd: 'SI=F', silver: 'SI=F', xag: 'SI=F',
   eurusd: 'EURUSD=X', gbpusd: 'GBPUSD=X', gbpjpy: 'GBPJPY=X',
@@ -73,7 +87,7 @@ function resolveSymbol(input, provider) {
   if (!input) return null;
   const k = String(input).toLowerCase().replace(/[^a-z]/g, '');
   if (provider === 'td') return TD_SYMBOLS[k] || input.toUpperCase();
-  return YH_SYMBOLS[k] || input.toUpperCase();
+  return YH_SYMBOLS_PRIMARY[k] || input.toUpperCase();
 }
 
 // ======================================================
@@ -99,32 +113,53 @@ const YH_TF_MAP = {
 
 // ======================================================
 //  YAHOO FINANCE (primary, tanpa key)
+//  Strategy: coba SPOT (XAU=X) dulu, fallback ke FUTURES (GC=F)
+//  Return: { candles, source } — source = 'spot' | 'futures'
 // ======================================================
 async function fetchYahoo(symbol, interval, outputsize) {
-  const sym = resolveSymbol(symbol, 'yh');
   const tf = YH_TF_MAP[interval] || YH_TF_MAP['1h'];
-  const path = `/v8/finance/chart/${encodeURIComponent(sym)}?interval=${tf.interval}&range=${tf.range}`;
-  const data = await fetchJson(YH_BASE, path);
-  const result = data.chart && data.chart.result && data.chart.result[0];
-  if (!result || !result.timestamp || !result.timestamp.length) {
-    const err = data.chart && data.chart.error;
-    throw new Error('Yahoo: ' + ((err && err.description) || `no data ${sym} ${interval}`));
+  const k = String(symbol).toLowerCase().replace(/[^a-z]/g, '');
+
+  // List symbol candidates: primary spot, fallback futures
+  const candidates = [
+    { sym: YH_SYMBOLS_PRIMARY[k], type: 'spot' },
+    { sym: YH_SYMBOLS_FALLBACK[k], type: 'futures' }
+  ].filter(c => c.sym);
+
+  let lastErr = null;
+  for (const cand of candidates) {
+    try {
+      const path = `/v8/finance/chart/${encodeURIComponent(cand.sym)}?interval=${tf.interval}&range=${tf.range}`;
+      const data = await fetchJson(YH_BASE, path);
+      const result = data.chart && data.chart.result && data.chart.result[0];
+      if (!result || !result.timestamp || !result.timestamp.length) {
+        const err = data.chart && data.chart.error;
+        lastErr = new Error(`${cand.type}: ${(err && err.description) || 'no data'}`);
+        continue;
+      }
+      const q = result.indicators.quote[0];
+      const out = [];
+      for (let i = 0; i < result.timestamp.length; i++) {
+        if (q.close[i] === null || q.close[i] === undefined) continue;
+        out.push({
+          openTime: result.timestamp[i] * 1000,
+          open: num(q.open[i]),
+          high: num(q.high[i]),
+          low: num(q.low[i]),
+          close: num(q.close[i]),
+          volume: num(q.volume[i]) || 0
+        });
+      }
+      if (!out.length) {
+        lastErr = new Error(`${cand.type}: no valid data ${cand.sym}`);
+        continue;
+      }
+      return { candles: out.slice(-outputsize), source: cand.type, symbol: cand.sym };
+    } catch (e) {
+      lastErr = e;
+    }
   }
-  const q = result.indicators.quote[0];
-  const out = [];
-  for (let i = 0; i < result.timestamp.length; i++) {
-    if (q.close[i] === null || q.close[i] === undefined) continue;
-    out.push({
-      openTime: result.timestamp[i] * 1000,
-      open: num(q.open[i]),
-      high: num(q.high[i]),
-      low: num(q.low[i]),
-      close: num(q.close[i]),
-      volume: num(q.volume[i]) || 0
-    });
-  }
-  if (!out.length) throw new Error(`Yahoo: no valid data ${sym} ${interval}`);
-  return out.slice(-outputsize);
+  throw lastErr || new Error('Yahoo: no data');
 }
 
 // ======================================================
@@ -167,23 +202,35 @@ async function fetchTD(symbol, interval, outputsize) {
 
 // ======================================================
 //  PUBLIC API
-//  Strategy: Yahoo first, fall back ke Twelve Data
+//  Return: { candles: [...], source: 'spot'|'futures'|'twelvedata', symbol, delay: '15min' }
 // ======================================================
 async function getCandles(symbol, interval = '1h', outputsize = 100) {
+  const result = await getCandlesWithMeta(symbol, interval, outputsize);
+  return result.candles;
+}
+
+async function getCandlesWithMeta(symbol, interval = '1h', outputsize = 100) {
   if (!symbol) throw new Error('Symbol kosong');
 
-  const cacheKey = `${symbol}_${interval}_${outputsize}`;
+  const cacheKey = `meta_${symbol}_${interval}_${outputsize}`;
   const cached = tfCache.get(cacheKey);
   if (cached) return cached;
 
   const errors = [];
 
-  // Primary: Yahoo Finance
+  // Primary: Yahoo Finance (spot, fallback futures)
   try {
-    const data = await fetchYahoo(symbol, interval, outputsize);
-    tfCache.set(cacheKey, data);
-    logger.info(`[yahoo] ${data.length} candles ${symbol} ${interval}`);
-    return data;
+    const r = await fetchYahoo(symbol, interval, outputsize);
+    const result = {
+      candles: r.candles,
+      source: 'yahoo-' + r.source,
+      symbol: r.symbol,
+      delay: r.source === 'spot' ? '~15min' : '~15min',
+      timestamp: Date.now()
+    };
+    tfCache.set(cacheKey, result);
+    logger.info(`[yahoo ${r.source}] ${r.candles.length} candles ${r.symbol} ${interval}`);
+    return result;
   } catch (e) {
     errors.push('yahoo: ' + e.message);
   }
@@ -191,10 +238,17 @@ async function getCandles(symbol, interval = '1h', outputsize = 100) {
   // Backup: Twelve Data
   if (TD_KEY) {
     try {
-      const data = await fetchTD(symbol, interval, outputsize);
-      tfCache.set(cacheKey, data);
-      logger.info(`[twelvedata] ${data.length} candles ${symbol} ${interval}`);
-      return data;
+      const candles = await fetchTD(symbol, interval, outputsize);
+      const result = {
+        candles,
+        source: 'twelvedata',
+        symbol: resolveSymbol(symbol, 'td'),
+        delay: '~1min',
+        timestamp: Date.now()
+      };
+      tfCache.set(cacheKey, result);
+      logger.info(`[twelvedata] ${candles.length} candles ${symbol} ${interval}`);
+      return result;
     } catch (e) {
       errors.push('twelvedata: ' + e.message);
     }
@@ -207,7 +261,10 @@ async function getMultiTimeframe(symbol, tfs = ['1day', '4h', '1h', '15min'], ou
   const results = {};
   for (const tf of tfs) {
     try {
-      results[tf] = await getCandles(symbol, tf, outputsize);
+      const r = await getCandlesWithMeta(symbol, tf, outputsize);
+      results[tf] = r.candles;
+      // Simpan source info di hasil pertama aja (untuk reporting)
+      if (!results.__meta) results.__meta = { source: r.source, symbol: r.symbol, delay: r.delay };
     } catch (e) {
       logger.warn(`${symbol} ${tf}: ${e.message}`);
       results[tf] = [];
@@ -219,9 +276,10 @@ async function getMultiTimeframe(symbol, tfs = ['1day', '4h', '1h', '15min'], ou
 
 module.exports = {
   getCandles,
+  getCandlesWithMeta,
   getMultiTimeframe,
   resolveSymbol,
   TD_SYMBOLS,
   FH_SYMBOLS: TD_SYMBOLS,  // back-compat
-  YH_SYMBOLS
+  YH_SYMBOLS: YH_SYMBOLS_PRIMARY
 };
