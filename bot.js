@@ -71,7 +71,11 @@ async function getCandles(tf, count = 200) {
 function getLastDataSource() {
   // ambil source dari cache entry terakhir yang masih ada
   for (const key of Object.keys(cache._s || {})) {
-    if (key.endsWith(':meta')) return cache._s[key].v;
+    if (key.endsWith(':meta')) {
+      const meta = cache._s[key].v;
+      if (typeof meta === 'string') return meta;
+      if (meta && typeof meta === 'object') return meta.source || null;
+    }
   }
   return null;
 }
@@ -435,9 +439,10 @@ function formatAnalysis(a) {
   let rtLine = `   XAUUSD: *$${fmt(a.realtimePrice)}*`;
 
   // Delay info dinamis
+  const sourceName = typeof a.dataSource === 'string' ? a.dataSource : (a.dataSource && a.dataSource.source) || '';
   let delayInfo = '~15min delay';
-  if (a.dataSource && a.dataSource.startsWith('oanda')) delayInfo = 'real-time';
-  else if (a.dataSource && a.dataSource.startsWith('twelvedata')) delayInfo = '~15min delay';
+  if (sourceName.startsWith('oanda')) delayInfo = 'real-time';
+  else if (sourceName.startsWith('twelvedata')) delayInfo = '~15min delay';
 
   lines.push(`💰 *HARGA REAL-TIME*`);
   lines.push(rtLine);
