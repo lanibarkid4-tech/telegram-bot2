@@ -266,11 +266,11 @@ function getSession() {
 async function fullAnalysis(execTF, mode) {
   // Mapping TF
   const tfMap = { '1m': '1min', '5m': '5min', '15m': '15min', '30m': '30min', '1h': '1h', '4h': '4h', '1day': '1day' };
-  const tfInternal = tfMap[execTF] || '15min';
+  const tfInternal = mode === 'scalping' ? '1min' : (tfMap[execTF] || '15min');
 
   // Pilih HTF bias & mid TF berdasarkan mode
   let htfTF, midTF;
-  if (mode === 'scalping') { htfTF = '1h'; midTF = '15min'; }
+  if (mode === 'scalping') { htfTF = '1h'; midTF = '5min'; }
   else if (mode === 'intraday') { htfTF = '4h'; midTF = '1h'; }
   else { htfTF = '1day'; midTF = '4h'; }
 
@@ -336,16 +336,32 @@ async function fullAnalysis(execTF, mode) {
   const direction = zoneInfo
     ? (zoneType.startsWith('BULLISH') ? 'BUY' : 'SELL')
     : (htfBias === 'BULLISH' ? 'BUY' : htfBias === 'BEARISH' ? 'SELL' : 'NONE');
+  const ltfPrev = ltf[ltf.length - 2];
+  const ltfLast = ltf[ltf.length - 1];
+  const bullishTrigger = ltfLast && ltfPrev && ltfLast.close > ltfLast.open && ltfLast.close > ltfPrev.high;
+  const bearishTrigger = ltfLast && ltfPrev && ltfLast.close < ltfLast.open && ltfLast.close < ltfPrev.low;
+  const m1Trigger = direction === 'BUY' && bullishTrigger
+    ? 'Bullish candle + break struktur mikro (BOS)'
+    : direction === 'SELL' && bearishTrigger
+      ? 'Bearish candle + break struktur mikro (BOS)'
+      : null;
 
   // 5. Entry, SL, TP
   let entry, sl, tp1, tp2, slPips, tp1Pips, tp2Pips;
+  const scalpDistance = 0.50;
+  const newsBlocked = mode === 'scalping' && process.env.HIGH_IMPACT_NEWS === 'true';
+  const scalpNoTrade = mode === 'scalping' && (htfBias === 'RANGING' || !m1Trigger || newsBlocked);
   if (zoneInfo) {
     entry = zoneInfo.midpoint || zoneInfo.price;
-    if (direction === 'BUY') {
-      sl = zoneInfo.low - 0.50; // 50 pips di bawah zone
+    if (mode === 'scalping') {
+      sl = direction === 'BUY' ? entry - scalpDistance : entry + scalpDistance;
+      tp1 = direction === 'BUY' ? entry + scalpDistance : entry - scalpDistance;
+      tp2 = direction === 'BUY' ? entry + scalpDistance * 1.5 : entry - scalpDistance * 1.5;
+    } else if (direction === 'BUY') {
+      sl = zoneInfo.low - 0.50;
       const slDist = entry - sl;
-      tp1 = entry + slDist * 1.5; // RR 1:1.5
-      tp2 = entry + slDist * 2.5; // RR 1:2.5
+      tp1 = entry + slDist * 1.5;
+      tp2 = entry + slDist * 2.5;
     } else {
       sl = zoneInfo.high + 0.50;
       const slDist = sl - entry;
@@ -355,7 +371,11 @@ async function fullAnalysis(execTF, mode) {
   } else {
     // Fallback: pakai current price
     entry = lastLtf;
-    if (direction === 'BUY') {
+    if (mode === 'scalping') {
+      sl = direction === 'BUY' ? entry - scalpDistance : entry + scalpDistance;
+      tp1 = direction === 'BUY' ? entry + scalpDistance : entry - scalpDistance;
+      tp2 = direction === 'BUY' ? entry + scalpDistance * 1.5 : entry - scalpDistance * 1.5;
+    } else if (direction === 'BUY') {
       sl = entry - 0.50;
       tp1 = entry + 0.75;
       tp2 = entry + 1.25;
@@ -409,6 +429,7 @@ async function fullAnalysis(execTF, mode) {
     midTF, htfTF,
     ltfSweeps, ltfStruct,
     confluence, score, probability,
+    scalpNoTrade, newsBlocked, m1Trigger,
     invalidation, wibStr,
     lastLtf,
     realtimePrice, high24h, low24h, open24h, change24h, changePct,
@@ -420,7 +441,43 @@ async function fullAnalysis(execTF, mode) {
 // ======================================================
 //  FORMAT OUTPUT
 // ======================================================
+function formatScalpingAnalysis(a) {
+  const biasReason = a.htfBias === 'BULLISH'
+    ? 'struktur bullish H1'
+    : a.htfBias === 'BEARISH'
+      ? 'struktur bearish H1'
+      : 'struktur H1 sideways/choppy';
+  if (a.scalpNoTrade) {
+    const reason = a.newsBlocked
+      ? 'ada indikasi news high-impact; hindari 15 menit sebelum/sesudah rilis'
+      : a.htfBias === 'RANGING'
+        ? 'bias H1 tidak jelas atau choppy'
+        : 'trigger M1 belum terkonfirmasi searah bias H1';
+    return `🚫 NO TRADE — XAUUSD, ${reason}.\n\n` +
+      `🕐 BIAS H1: ${a.htfBias} — ${biasReason}.\n` +
+      `📉 STRUKTUR M5: tunggu zona ${a.htfBias === 'BEARISH' ? 'supply' : 'demand'} yang searah bias.\n` +
+      `⏱️ TRIGGER M1: belum valid.\n` +
+      `⏳ Validasi ulang dalam 5 menit.\n` +
+      `📝 CATATAN: scalping tidak boleh dipaksakan; cek kalender news high-impact dan spread secara manual.`;
+  }
+
+  const directionSign = a.direction === 'BUY' ? '+' : '-';
+  const zone = a.zoneInfo ? `${fmt(a.zoneInfo.low)} - ${fmt(a.zoneInfo.high)} (${a.zoneType})` : 'current price, tanpa OB/FVG valid';
+  return `⚡ SCALPING SIGNAL\n` +
+    `📊 PAIR: XAUUSD\n` +
+    `🕐 BIAS H1: ${a.direction} — ${biasReason}; filter arah saja.\n` +
+    `📉 STRUKTUR M5: ${zone}\n` +
+    `⏱️ TRIGGER M1: ${a.m1Trigger}\n` +
+    `🎯 ENTRY ZONE: ${fmt(a.entry)} (range sempit, eksekusi cepat)\n` +
+    `🛑 STOP LOSS: ${fmt(a.sl)} (–50 pips)\n` +
+    `✅ TAKE PROFIT 1: ${fmt(a.tp1)} (${directionSign}50 pips, RR 1:1)\n` +
+    `✅ TAKE PROFIT 2: ${fmt(a.tp2)} (${directionSign}75 pips, RR 1:1.5)\n` +
+    `⏳ VALID SELAMA: 15-20 menit sejak sinyal dikirim\n` +
+    `📝 CATATAN: time stop bila harga belum bergerak sesuai arah setelah 15-20 menit. Hindari 15 menit sebelum/sesudah news high-impact; kalender news belum terhubung otomatis.`;
+}
+
 function formatAnalysis(a) {
+  if (a.mode === 'scalping') return formatScalpingAnalysis(a);
   const tfLabel = { '1m': 'M1', '5m': 'M5', '15m': 'M15', '30m': 'M30', '1h': 'H1', '4h': 'H4', '1day': 'D1' }[a.execTF];
   const em = a.direction === 'BUY' ? '🟢' : a.direction === 'SELL' ? '🔴' : '⚪';
 
