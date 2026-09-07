@@ -425,58 +425,53 @@ function formatAnalysis(a) {
   const em = a.direction === 'BUY' ? '🟢' : a.direction === 'SELL' ? '🔴' : '⚪';
 
   const lines = [];
-  lines.push(`📊 *XAUUSD ANALYSIS* — Mode: ${a.mode.toUpperCase()}`);
-  lines.push(`🕒 Timeframe Acuan: *${tfLabel}*`);
+  lines.push(`📊 XAUUSD ANALYSIS — Mode: ${a.mode.toUpperCase()}`);
+  lines.push(`🕒 Timeframe Acuan: ${tfLabel}`);
   lines.push(`📅 Waktu Analisa: ${a.wibStr} WIB`);
   lines.push('');
 
-  // REALTIME PRICE INFO
   const changeSign = a.change24h >= 0 ? '+' : '';
   const changeEmoji = a.change24h >= 0 ? '📈' : '📉';
   const distToHigh = ((a.high24h - a.realtimePrice) / a.realtimePrice * 100).toFixed(2);
   const distToLow = ((a.realtimePrice - a.low24h) / a.realtimePrice * 100).toFixed(2);
-  // Realtime price dari Twelve Data
-  let rtLine = `   XAUUSD: *$${fmt(a.realtimePrice)}*`;
+  const rtLine = `   XAUUSD: $${fmt(a.realtimePrice)}`;
 
-  // Delay info dinamis
   const sourceName = typeof a.dataSource === 'string' ? a.dataSource : (a.dataSource && a.dataSource.source) || '';
+  const sourceLabel = sourceName || 'twelvedata';
   let delayInfo = '~15min delay';
-  if (sourceName.startsWith('oanda')) delayInfo = 'real-time';
-  else if (sourceName.startsWith('twelvedata')) delayInfo = '~15min delay';
+  if (sourceLabel.startsWith('oanda')) delayInfo = 'real-time';
+  else if (sourceLabel.startsWith('twelvedata')) delayInfo = '~15min delay';
 
-  lines.push(`💰 *HARGA REAL-TIME*`);
+  lines.push('💰 HARGA REAL-TIME');
   lines.push(rtLine);
   lines.push(`   ${changeEmoji} 24h: ${changeSign}${fmt(a.change24h)} (${changeSign}${fmt(a.changePct, 2)}%)`);
   lines.push(`   📊 24h High: $${fmt(a.high24h)} | Low: $${fmt(a.low24h)}`);
   lines.push(`   📏 Jarak ke High: ${distToHigh}% | ke Low: ${distToLow}%`);
-  lines.push(`   📡 Source: ${a.dataSource || 'oanda'} (${delayInfo})`);
+  lines.push(`   📡 Source: ${sourceLabel} (${delayInfo})`);
   lines.push('');
 
-  // HTF BIAS
   const biasEmoji = a.htfBias === 'BULLISH' ? '🟢' : a.htfBias === 'BEARISH' ? '🔴' : '🟡';
-  lines.push(`🔎 *HTF BIAS (${a.htfTF}):* ${biasEmoji} ${a.htfBias}`);
+  lines.push(`🔎 HTF BIAS (${a.htfTF}): ${biasEmoji} ${a.htfBias}`);
   lines.push(`   Struktur: ${a.htfStruct.structure}${a.htfStruct.lastSwing ? ' di level ' + fmt(a.htfStruct.lastSwing.price) : ''}`);
   lines.push(`   Zona: ${a.htfZone}`);
   lines.push('');
 
-  // ZONA ENTRY
   if (a.zoneInfo) {
     const zLow = fmt(a.zoneInfo.low);
     const zHigh = fmt(a.zoneInfo.high);
-    lines.push(`📍 *ZONA ENTRY*`);
+    lines.push('📍 ZONA ENTRY');
     lines.push(`   Tipe: ${a.zoneType}`);
     lines.push(`   Range: ${zLow} – ${zHigh}`);
     lines.push(`   Timeframe konfirmasi: ${a.midTF}`);
   } else {
-    lines.push(`📍 *ZONA ENTRY*`);
-    lines.push(`   ⚠️ Tidak ada OB/FVG searah bias, fallback ke current price`);
+    lines.push('📍 ZONA ENTRY');
+    lines.push('   ⚠️ Tidak ada OB/FVG searah bias, fallback ke current price');
   }
   lines.push('');
 
-  // SKENARIO TRADE
   if (a.direction !== 'NONE') {
-    lines.push(`🎯 *SKENARIO TRADE*`);
-    lines.push(`   Arah: ${em} *${a.direction}*`);
+    lines.push('🎯 SKENARIO TRADE');
+    lines.push(`   Arah: ${em} ${a.direction}`);
     lines.push(`   Entry: ${fmt(a.entry)}`);
     lines.push(`   Stop Loss: ${fmt(a.sl)} (≈ ${a.slPips} pips)`);
     lines.push(`   Take Profit 1: ${fmt(a.tp1)} (RR 1:1.5)`);
@@ -484,35 +479,32 @@ function formatAnalysis(a) {
     const rr = a.tp2Pips / Math.max(1, a.slPips);
     lines.push(`   Risk : Reward: 1:${fmt(rr, 2)}`);
   } else {
-    lines.push(`🎯 *SKENARIO TRADE*`);
-    lines.push(`   ⚠️ Tidak ada arah jelas, bias ranging. Tunggu konfirmasi.`);
+    lines.push('🎯 SKENARIO TRADE');
+    lines.push('   ⚠️ Tidak ada arah jelas, bias ranging. Tunggu konfirmasi.');
   }
   lines.push('');
 
-  // CONFLUENCE
   const c = a.confluence;
-  lines.push(`✅ *KONFLUENSI TERPENUHI:*`);
+  lines.push('✅ KONFLUENSI TERPENUHI:');
   lines.push(`   ${c.ictStructure ? '✅' : '❌'} ICT/SMC Structure (OB/FVG/Liquidity Sweep)`);
   lines.push(`   ${c.supplyDemand ? '✅' : '❌'} Supply/Demand Zone`);
   lines.push(`   ${c.killzone ? '✅' : '❌'} Killzone Session Timing`);
   lines.push(`   ${c.fibonacci ? '✅' : '❌'} Fibonacci Golden Zone`);
   lines.push(`   ${c.momentum ? '✅' : '❌'} Momentum/Volume Confirmation`);
-  lines.push(`   *Skor: ${a.score}/5 = ${a.probability}*`);
+  lines.push(`   Skor: ${a.score}/5 = ${a.probability}`);
   lines.push('');
 
-  // RISK NOTE
-  lines.push(`⚠️ *CATATAN RISIKO:*`);
-  lines.push(`   • Perhatikan jadwal rilis berita high impact hari ini.`);
-  lines.push(`   • Ini analisa probabilistik, bukan sinyal pasti profit.`);
-  lines.push(`   • Gunakan money management, risk per trade 1–2% modal.`);
+  lines.push('⚠️ CATATAN RISIKO:');
+  lines.push('   • Perhatikan jadwal rilis berita high impact hari ini.');
+  lines.push('   • Ini analisa probabilistik, bukan sinyal pasti profit.');
+  lines.push('   • Gunakan money management, risk per trade 1–2% modal.');
   lines.push('');
 
-  // INVALIDATION
-  lines.push(`🔁 *INVALIDASI SETUP:*`);
+  lines.push('🔁 INVALIDASI SETUP:');
   lines.push(`   Jika harga menembus ${fmt(a.invalidation)} sebelum entry aktif, setup dianggap batal.`);
   lines.push('');
 
-  lines.push(`⚠️ Disclaimer: Analisa ini bersifat edukasi dan bukan nasihat keuangan atau ajakan trading. Trading forex/gold mengandung risiko tinggi, termasuk risiko kehilangan modal. Gunakan manajemen risiko yang tepat.`);
+  lines.push('⚠️ Disclaimer: Analisa ini bersifat edukasi dan bukan nasihat keuangan atau ajakan trading. Trading forex/gold mengandung risiko tinggi, termasuk risiko kehilangan modal. Gunakan manajemen risiko yang tepat.');
 
   return lines.join('\n');
 }
@@ -522,25 +514,25 @@ function formatAnalysis(a) {
 // ======================================================
 const WELCOME = (n) => `Halo ${n}! 👋
 
-*🏆 XAUUSD ICT/SMC Analyst*
+🏆 XAUUSD ICT/SMC Analyst
 
 Bot analisa teknikal XAUUSD berbasis ICT/SMC + 5 konfluensi.
 
-📊 *CARA PAKAI:*
+📊 CARA PAKAI:
 /xauusd — Mulai analisa (pilih TF & mode)
 /help — Bantuan
 /status — Status bot & session
 /cancel — Batalkan analisa
 
-⚠️ _Bukan saran finansial. Gunakan MM._`;
+⚠️ Bukan saran finansial. Gunakan MM.`;
 
 bot.onText(/^\/start$/, (m) => {
-  bot.sendMessage(m.chat.id, WELCOME(m.from.first_name || 'Trader'), { parse_mode: 'Markdown' });
+  bot.sendMessage(m.chat.id, WELCOME(m.from.first_name || 'Trader'));
   logger.info('User: ' + m.from.first_name);
 });
 
 bot.onText(/^\/help$/, (m) => {
-  bot.sendMessage(m.chat.id, WELCOME(m.from.first_name || 'Trader'), { parse_mode: 'Markdown' });
+  bot.sendMessage(m.chat.id, WELCOME(m.from.first_name || 'Trader'));
 });
 
 bot.onText(/^\/cancel$/, (m) => {
@@ -556,12 +548,11 @@ bot.onText(/^\/status$/, (m) => {
   const s = up % 60;
   const sess = getSession();
   bot.sendMessage(m.chat.id,
-    `🟢 *STATUS*\n` +
+    `🟢 STATUS\n` +
     `⏱ ${h}h ${min}m ${s}s\n` +
-    `📡 Yahoo+TD: ${TD_KEY ? '✅' : '🟡'}\n` +
+    `📡 Data: ${TD_KEY ? '✅' : '🟡'}\n` +
     `🌐 Session: ${sess.emoji} ${sess.name} (${sess.wib} WIB)\n` +
-    `⚡ Killzone: ${sess.inKillzone ? 'YA ✅' : 'TIDAK ❌'}`,
-    { parse_mode: 'Markdown' }
+    `⚡ Killzone: ${sess.inKillzone ? 'YA ✅' : 'TIDAK ❌'}`
   );
 });
 
@@ -571,8 +562,8 @@ bot.onText(/^\/xauusd$/, (m) => {
   if (!limiter.checkLimit('/xauusd')) return bot.sendMessage(cid, '⏳ Tunggu sebentar...');
   setState(cid, { step: 'tf' });
   bot.sendMessage(cid,
-    `📊 *XAUUSD ANALYSIS*\n\nPilih *Timeframe* eksekusi:`,
-    { parse_mode: 'Markdown', ...TF_KEYBOARD }
+    `📊 XAUUSD ANALYSIS\n\nPilih Timeframe eksekusi:`,
+    { ...TF_KEYBOARD }
   );
 });
 
@@ -594,8 +585,8 @@ bot.on('callback_query', async (q) => {
     setState(cid, { step: 'tf' });
     await bot.answerCallbackQuery(q.id);
     return bot.editMessageText(
-      `📊 *XAUUSD ANALYSIS*\n\nPilih *Timeframe* eksekusi:`,
-      { chat_id: cid, message_id: q.message.message_id, parse_mode: 'Markdown', ...TF_KEYBOARD }
+      `📊 XAUUSD ANALYSIS\n\nPilih Timeframe eksekusi:`,
+      { chat_id: cid, message_id: q.message.message_id, ...TF_KEYBOARD }
     );
   }
 
@@ -606,8 +597,8 @@ bot.on('callback_query', async (q) => {
     const tfLabel = { '1m': 'M1', '5m': 'M5', '15m': 'M15', '30m': 'M30', '1h': 'H1', '4h': 'H4', '1day': 'D1' }[tf];
     await bot.answerCallbackQuery(q.id, { text: `TF: ${tfLabel}` });
     return bot.editMessageText(
-      `📊 *XAUUSD ANALYSIS*\n\nTF: *${tfLabel}*\n\nPilih *Mode* trading:`,
-      { chat_id: cid, message_id: q.message.message_id, parse_mode: 'Markdown', ...MODE_KEYBOARD }
+      `📊 XAUUSD ANALYSIS\n\nTF: ${tfLabel}\n\nPilih Mode trading:`,
+      { chat_id: cid, message_id: q.message.message_id, ...MODE_KEYBOARD }
     );
   }
 
@@ -633,16 +624,16 @@ bot.on('callback_query', async (q) => {
       // Telegram max 4096 chars
       if (text.length <= 4000) {
         await bot.editMessageText(text, {
-          chat_id: cid, message_id: q.message.message_id, parse_mode: 'Markdown'
+          chat_id: cid, message_id: q.message.message_id
         });
       } else {
         // Split jadi 2 pesan
         const half = Math.floor(text.length / 2);
         const splitAt = text.lastIndexOf('\n', half);
         await bot.editMessageText(text.substring(0, splitAt), {
-          chat_id: cid, message_id: q.message.message_id, parse_mode: 'Markdown'
+          chat_id: cid, message_id: q.message.message_id
         });
-        await bot.sendMessage(cid, text.substring(splitAt), { parse_mode: 'Markdown' });
+        await bot.sendMessage(cid, text.substring(splitAt));
       }
     } catch (e) {
       logger.error('analysis err: ' + e.message);
