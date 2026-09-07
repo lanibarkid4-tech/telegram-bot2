@@ -27,7 +27,7 @@ if (!TOKEN) {
 const TD_KEY = process.env.TWELVE_DATA_API_KEY;
 console.log('========================================');
 console.log('🏆 XAUUSD ICT/SMC ANALYST');
-console.log('📡 Yahoo + TD: ' + (TD_KEY ? 'FULL' : 'YAHOO ONLY'));
+console.log('📡 Data: Twelve Data (XAU/USD spot)');
 console.log('⏰ ' + new Date().toLocaleString());
 console.log('========================================');
 
@@ -431,12 +431,20 @@ function formatAnalysis(a) {
   const changeEmoji = a.change24h >= 0 ? '📈' : '📉';
   const distToHigh = ((a.high24h - a.realtimePrice) / a.realtimePrice * 100).toFixed(2);
   const distToLow = ((a.realtimePrice - a.low24h) / a.realtimePrice * 100).toFixed(2);
+  // Realtime price dari Twelve Data
+  let rtLine = `   XAUUSD: *$${fmt(a.realtimePrice)}*`;
+
+  // Delay info dinamis
+  let delayInfo = '~15min delay';
+  if (a.dataSource && a.dataSource.startsWith('oanda')) delayInfo = 'real-time';
+  else if (a.dataSource && a.dataSource.startsWith('twelvedata')) delayInfo = '~15min delay';
+
   lines.push(`💰 *HARGA REAL-TIME*`);
-  lines.push(`   XAUUSD: *$${fmt(a.realtimePrice)}*`);
+  lines.push(rtLine);
   lines.push(`   ${changeEmoji} 24h: ${changeSign}${fmt(a.change24h)} (${changeSign}${fmt(a.changePct, 2)}%)`);
   lines.push(`   📊 24h High: $${fmt(a.high24h)} | Low: $${fmt(a.low24h)}`);
   lines.push(`   📏 Jarak ke High: ${distToHigh}% | ke Low: ${distToLow}%`);
-  lines.push(`   📡 Source: ${a.dataSource || 'yahoo-futures'} (~15min delay)`);
+  lines.push(`   📡 Source: ${a.dataSource || 'oanda'} (${delayInfo})`);
   lines.push('');
 
   // HTF BIAS
