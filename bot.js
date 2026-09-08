@@ -162,7 +162,7 @@ function getTwentyMethodZone(analysis, bias, price, atrValue) {
   if (!analysis || !analysis.methodAgreement || !analysis.additionalMethods) return null;
   const agreement = analysis.methodAgreement;
   const expected = bias === 'BULLISH' ? 'BUY' : bias === 'BEARISH' ? 'SELL' : 'MIXED';
-  if (expected === 'MIXED' || agreement.direction !== expected || agreement.confidence < 55) return null;
+  if (expected === 'MIXED' || agreement.direction !== expected || agreement.total < 1) return null;
 
   const methods = analysis.additionalMethods;
   const levels = [
@@ -513,8 +513,8 @@ async function fullAnalysis(execTF, mode) {
   let entry, sl, tp1, tp2, slPips, tp1Pips, tp2Pips;
   const scalpDistance = 0.50;
   const newsBlocked = mode === 'scalping' && process.env.HIGH_IMPACT_NEWS === 'true';
-  const methodAgreementWeak = mode === 'scalping' && (!confluenceAnalysisResult.methodAgreement || confluenceAnalysisResult.methodAgreement.confidence < 55);
-  const scalpNoTrade = mode === 'scalping' && (htfBias === 'RANGING' || !zoneInfo || newsBlocked || methodAgreementWeak);
+  const methodSignalAvailable = confluenceAnalysisResult.methodAgreement && confluenceAnalysisResult.methodAgreement.total > 0;
+  const scalpNoTrade = mode === 'scalping' && (htfBias === 'RANGING' || !zoneInfo || newsBlocked || !methodSignalAvailable);
   if (zoneInfo) {
     entry = zoneInfo.midpoint || zoneInfo.price;
     if (mode === 'scalping') {
@@ -624,8 +624,8 @@ function formatScalpingAnalysis(a) {
       ? 'ada indikasi news high-impact; hindari 15 menit sebelum/sesudah rilis'
       : a.htfBias === 'RANGING'
         ? 'bias H1 tidak jelas atau choppy'
-        : a.confluenceAnalysis?.methodAgreement?.confidence < 55
-          ? '20 metode belum cukup kompak searah bias H1'
+        : !a.confluenceAnalysis?.methodAgreement?.total
+          ? 'belum ada metode yang menghasilkan signal valid'
         : 'belum ditemukan zona entry M5 yang valid searah bias H1';
     return `🚫 NO TRADE — XAUUSD, ${reason}.\n\n` +
       `1. HTF BIAS H1\n   ${a.htfBias} — ${biasReason}.\n\n` +
