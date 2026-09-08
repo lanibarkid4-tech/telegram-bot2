@@ -138,6 +138,30 @@ function getIndicatorZoneCandidates(ta, bias, price) {
   }));
 }
 
+function getM5Atr(candles, period = 14) {
+  if (!candles || candles.length < period + 1) return 0.5;
+  const recent = candles.slice(-(period + 1));
+  const ranges = recent.slice(1).map((candle, index) => {
+    const previous = recent[index];
+    return Math.max(candle.high - candle.low, Math.abs(candle.high - previous.close), Math.abs(candle.low - previous.close));
+  });
+  return ranges.reduce((sum, value) => sum + value, 0) / ranges.length;
+}
+
+function getNearbyScalpZone(price, direction, m5Atr) {
+  const width = Math.max(m5Atr * 0.35, 0.15);
+  return {
+    type: 'M5_NEAR_PRICE_PULLBACK',
+    direction,
+    low: direction === 'BUY' ? price - width : price,
+    high: direction === 'BUY' ? price : price + width,
+    midpoint: direction === 'BUY' ? price - width * 0.5 : price + width * 0.5,
+    source: 'near-price-pullback',
+    levelSources: ['current price', 'M5 ATR'],
+    zoneValidation: { score: 50, valid: true, reasons: ['near current price', 'M5 ATR-sized'] }
+  };
+}
+
 function scoreZone(zone, bias, ta, pressure, methodAgreement, candles) {
   const indicators = ta && ta.indicators ? ta.indicators : {};
   const bullish = bias === 'BULLISH';
@@ -519,7 +543,13 @@ async function fullAnalysis(execTF, mode) {
       : [];
   const indicatorCandidates = getIndicatorZoneCandidates(ta, indicatorBias, lastLtf);
   const methodZone = getTwentyMethodZone(confluenceAnalysisResult, methodDirection, lastLtf, ta.atr);
-  const zoneCandidates = [...ictCandidates, ...indicatorCandidates, ...(methodZone ? [methodZone] : [])]
+  const m5Atr = getM5Atr(mid);
+  const maxZoneDistance = Math.max(m5Atr * 2, 1.5);
+  const candidates = [...ictCandidates, ...indicatorCandidates, ...(methodZone ? [methodZone] : [])]
+    .filter(zone => Math.abs(Number(zone.midpoint || zone.price) - lastLtf) <= maxZoneDistance);
+  const zoneCandidates = [...candidates, ...(!candidates.length && ['BUY', 'SELL'].includes(methodDirection)
+    ? [getNearbyScalpZone(lastLtf, methodDirection, m5Atr)]
+    : [])]
     .map(zone => scoreZone(zone, indicatorBias, ta, normalizedPressure, confluenceAnalysisResult.methodAgreement, mid))
     .sort((a, b) => b.totalZoneScore - a.totalZoneScore);
 
