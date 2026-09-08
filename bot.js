@@ -158,6 +158,43 @@ function scoreZone(zone, bias, ta, pressure, methodAgreement) {
   };
 }
 
+function getTwentyMethodZone(analysis, bias, price, atrValue) {
+  if (!analysis || !analysis.methodAgreement || !analysis.additionalMethods) return null;
+  const agreement = analysis.methodAgreement;
+  const expected = bias === 'BULLISH' ? 'BUY' : bias === 'BEARISH' ? 'SELL' : 'MIXED';
+  if (expected === 'MIXED' || agreement.direction !== expected || agreement.confidence < 55) return null;
+
+  const methods = analysis.additionalMethods;
+  const levels = [
+    ['VPOC', analysis.volumeProfile && analysis.volumeProfile.vpoc],
+    ['VWAP', analysis.vwap && analysis.vwap.vwap],
+    ['Market Profile POC', analysis.marketProfile && analysis.marketProfile.poc],
+    ['Pivot', methods.pivotPoints && methods.pivotPoints.pivot],
+    ['Fibonacci 61.8', methods.fibonacci && methods.fibonacci.level618],
+    ['Support', methods.supportResistance && methods.supportResistance.support],
+    ['Resistance', methods.supportResistance && methods.supportResistance.resistance],
+    ['Keltner mid', methods.keltner && methods.keltner.middle],
+    ['Donchian high', methods.donchian && methods.donchian.high],
+    ['Donchian low', methods.donchian && methods.donchian.low]
+  ].filter(([, level]) => Number.isFinite(Number(level)));
+
+  const directional = levels.filter(([, level]) => bias === 'BULLISH' ? level <= price : level >= price);
+  if (!directional.length) return null;
+  const nearest = directional.sort((a, b) => Math.abs(a[1] - price) - Math.abs(b[1] - price)).slice(0, 4);
+  const midpoint = nearest.reduce((sum, [, level]) => sum + Number(level), 0) / nearest.length;
+  const width = Math.max(Number(atrValue || 0) * 0.2, 0.15);
+  return {
+    type: '20_METHOD_CLUSTER',
+    direction: bias === 'BULLISH' ? 'BUY' : 'SELL',
+    low: bias === 'BULLISH' ? midpoint - width : midpoint,
+    high: bias === 'BULLISH' ? midpoint : midpoint + width,
+    midpoint,
+    source: '20-method-confluence',
+    levelSources: nearest.map(([name]) => name),
+    methodAgreement: agreement
+  };
+}
+
 async function getPressureWithFallback(candleList) {
   try {
     const flow = await dukascopy.getFlowProxy('XAUUSD', 8);
@@ -454,7 +491,8 @@ async function fullAnalysis(execTF, mode) {
         ]
       : [];
   const indicatorCandidates = getIndicatorZoneCandidates(ta, indicatorBias, lastLtf);
-  const zoneCandidates = [...ictCandidates, ...indicatorCandidates]
+  const methodZone = getTwentyMethodZone(confluenceAnalysisResult, indicatorBias, lastLtf, ta.atr);
+  const zoneCandidates = [...ictCandidates, ...indicatorCandidates, ...(methodZone ? [methodZone] : [])]
     .map(zone => scoreZone(zone, indicatorBias, ta, normalizedPressure, confluenceAnalysisResult.methodAgreement))
     .sort((a, b) => b.confluenceScore - a.confluenceScore);
 
@@ -475,7 +513,8 @@ async function fullAnalysis(execTF, mode) {
   let entry, sl, tp1, tp2, slPips, tp1Pips, tp2Pips;
   const scalpDistance = 0.50;
   const newsBlocked = mode === 'scalping' && process.env.HIGH_IMPACT_NEWS === 'true';
-  const scalpNoTrade = mode === 'scalping' && (htfBias === 'RANGING' || !zoneInfo || newsBlocked);
+  const methodAgreementWeak = mode === 'scalping' && (!confluenceAnalysisResult.methodAgreement || confluenceAnalysisResult.methodAgreement.confidence < 55);
+  const scalpNoTrade = mode === 'scalping' && (htfBias === 'RANGING' || !zoneInfo || newsBlocked || methodAgreementWeak);
   if (zoneInfo) {
     entry = zoneInfo.midpoint || zoneInfo.price;
     if (mode === 'scalping') {
@@ -585,6 +624,8 @@ function formatScalpingAnalysis(a) {
       ? 'ada indikasi news high-impact; hindari 15 menit sebelum/sesudah rilis'
       : a.htfBias === 'RANGING'
         ? 'bias H1 tidak jelas atau choppy'
+        : a.confluenceAnalysis?.methodAgreement?.confidence < 55
+          ? '20 metode belum cukup kompak searah bias H1'
         : 'belum ditemukan zona entry M5 yang valid searah bias H1';
     return `🚫 NO TRADE — XAUUSD, ${reason}.\n\n` +
       `1. HTF BIAS H1\n   ${a.htfBias} — ${biasReason}.\n\n` +
@@ -606,6 +647,7 @@ function formatScalpingAnalysis(a) {
     `2. ENTRY ZONE M5\n` +
     `   ${zone}\n` +
     `   Entry: ${fmt(a.zoneInfo?.low)} - ${fmt(a.zoneInfo?.high)}\n` +
+    `   Basis zona: ${a.zoneInfo?.source || 'ICT/SMC'}${a.zoneInfo?.levelSources ? ` (${a.zoneInfo.levelSources.join(', ')})` : ''}\n` +
     `   Konfluensi: ${(a.zoneInfo?.confluence || []).join(', ') || 'belum ada'} (${a.zoneInfo?.confluenceScore || 0} faktor)\n` +
     `   Narasi: H1 memberi arah ${a.direction}; M5 menyediakan ${a.zoneType} sebagai area retracement.\n\n` +
     `3. FLOW CONFIRMATION\n` +
