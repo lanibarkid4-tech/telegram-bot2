@@ -16,6 +16,9 @@ const TelegramBot = require('node-telegram-bot-api');
 const candles = require('./candles');
 const xauusdTA = require('./xauusd-ta');
 const ict = require('./ict-structures');
+const orderflow = require('./orderflow');
+const dukascopy = require('./dukascopy');
+const confluenceAnalysis = require('./confluence');
 const { RateLimiter, Logger, GracefulShutdown } = require('./utils');
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -78,6 +81,109 @@ function getLastDataSource() {
     }
   }
   return null;
+}
+
+function candlePressureFallback(candleList) {
+  const recent = (candleList || []).slice(-8);
+  let bullishPressure = 0;
+  let bearishPressure = 0;
+  let net = 0;
+
+  for (const candle of recent) {
+    if (candle.close > candle.open) bullishPressure++;
+    else if (candle.close < candle.open) bearishPressure++;
+    net += candle.close - candle.open;
+  }
+
+  return {
+    bullishPressure,
+    bearishPressure,
+    net,
+    source: 'm5-candle-fallback',
+    note: 'Fallback dari arah candle M5; bukan true footprint'
+  };
+}
+
+function getIndicatorZoneCandidates(ta, bias, price) {
+  const indicators = ta && ta.indicators ? ta.indicators : {};
+  const levels = [];
+  const supportNearest = Number(ta && ta.supportNearest);
+  const resistanceNearest = Number(ta && ta.resistanceNearest);
+  const zoneWidth = Math.max(Number(ta && ta.atr || 0) * 0.25, 0.15);
+
+  if (bias === 'BULLISH') {
+    if (Number.isFinite(supportNearest) && supportNearest < price) {
+      levels.push({ type: 'SUPPORT_ZONE', level: supportNearest, label: 'support' });
+    }
+    if (Number.isFinite(indicators.bb_lower) && indicators.bb_lower < price) {
+      levels.push({ type: 'BB_LOWER_ZONE', level: indicators.bb_lower, label: 'Bollinger lower band' });
+    }
+  } else if (bias === 'BEARISH') {
+    if (Number.isFinite(resistanceNearest) && resistanceNearest > price) {
+      levels.push({ type: 'RESISTANCE_ZONE', level: resistanceNearest, label: 'resistance' });
+    }
+    if (Number.isFinite(indicators.bb_upper) && indicators.bb_upper > price) {
+      levels.push({ type: 'BB_UPPER_ZONE', level: indicators.bb_upper, label: 'Bollinger upper band' });
+    }
+  }
+
+  return levels.map(item => ({
+    type: item.type,
+    label: item.label,
+    direction: bias === 'BULLISH' ? 'BUY' : 'SELL',
+    low: bias === 'BULLISH' ? item.level - zoneWidth : item.level,
+    high: bias === 'BULLISH' ? item.level : item.level + zoneWidth,
+    midpoint: item.level,
+    source: 'technical-indicator'
+  }));
+}
+
+function scoreZone(zone, bias, ta, pressure, methodAgreement) {
+  const indicators = ta && ta.indicators ? ta.indicators : {};
+  const bullish = bias === 'BULLISH';
+  const score = {
+    htfDirection: 2,
+    technicalZone: zone.source === 'technical-indicator' ? 1 : 0,
+    rsi: bullish ? indicators.rsi > 50 : indicators.rsi < 50,
+    macd: bullish ? indicators.macd_hist > 0 : indicators.macd_hist < 0,
+    ema: bullish ? ['STRONG_UP', 'WEAK_UP'].includes(indicators.ema_trend) : ['STRONG_DOWN', 'WEAK_DOWN'].includes(indicators.ema_trend),
+    pressure: bullish ? pressure.net > 0 : pressure.net < 0,
+    methodAgreement: methodAgreement && ((bullish && methodAgreement.direction === 'BUY') || (!bullish && methodAgreement.direction === 'SELL'))
+  };
+
+  return {
+    ...zone,
+    confluence: Object.entries(score).filter(([, ok]) => ok === true).map(([name]) => name),
+    confluenceScore: Object.values(score).filter(Boolean).length
+  };
+}
+
+async function getPressureWithFallback(candleList) {
+  try {
+    const flow = await dukascopy.getFlowProxy('XAUUSD', 8);
+    if (flow && Array.isArray(flow.ticks) && flow.ticks.length >= 2) {
+      return { ...flow, source: 'dukascopy-proxy', note: 'Tick pressure proxy' };
+    }
+  } catch (e) {
+    logger.warn('Dukascopy fallback: ' + e.message);
+  }
+
+  try {
+    const flow = await orderflow.getOrderFlow('XAU/USD', '5min', 8);
+    if (flow && (flow.bullishVolume || flow.bearishVolume || flow.cumulativeDelta)) {
+      return {
+        bullishPressure: Number(flow.bullishVolume || 0),
+        bearishPressure: Number(flow.bearishVolume || 0),
+        net: Number(flow.cumulativeDelta || 0),
+        source: 'oanda-orderflow-fallback',
+        note: 'Fallback OANDA tick-volume proxy'
+      };
+    }
+  } catch (e) {
+    logger.warn('OANDA orderflow fallback: ' + e.message);
+  }
+
+  return candlePressureFallback(candleList);
 }
 
 // ======================================================
@@ -297,11 +403,9 @@ async function fullAnalysis(execTF, mode) {
   const ictA = ict.analyze(mid, { lookback: 80 });
   const lastLtf = ltf[ltf.length - 1].close;
 
-  // Pilih zone searah HTF bias
+  // Kandidat zona searah HTF bias, lalu dipilih berdasarkan konfluensi indikator.
   let zoneInfo = null;
   let zoneType = 'NONE';
-  const buySignal = htfBias === 'BULLISH';
-  const sellSignal = htfBias === 'BEARISH';
 
   // 24h stats (real-time) — pakai 1day candle + 1m terakhir
   const dayCandle = htfTF === '1day' ? htf[htf.length - 1] : null;
@@ -313,19 +417,50 @@ async function fullAnalysis(execTF, mode) {
   const change24h = lastLtf - open24h;
   const changePct = open24h ? (change24h / open24h) * 100 : 0;
   const realtimePrice = realtime1m.length ? realtime1m[realtime1m.length - 1].close : lastLtf;
+  const pressure = await getPressureWithFallback(mid);
+  const normalizedPressure = pressure && typeof pressure === 'object' ? {
+    bullishPressure: Number(pressure.bullishPressure || 0),
+    bearishPressure: Number(pressure.bearishPressure || 0),
+    net: Number(pressure.net || 0),
+    source: pressure.source || 'm5-candle-fallback',
+    note: pressure.note || 'Proxy data only'
+  } : {
+    bullishPressure: 0,
+    bearishPressure: 0,
+    net: 0,
+    source: 'unavailable',
+    note: 'Pressure data unavailable'
+  };
+  const confluenceAnalysisResult = confluenceAnalysis.analyzeConfluence({
+    candles: mid,
+    timeframes: { H1: htf, M5: mid, LTF: ltf },
+    ta,
+    pressure: normalizedPressure
+  });
 
-  if (buySignal || htfBias === 'RANGING') {
-    // Cari BULLISH OB di bawah harga
-    const buyOB = (ictA.orderBlocks || []).find(o => o.type === 'BULLISH_OB' && o.high < lastLtf);
-    const buyFVG = (ictA.fvgs || []).find(f => f.type === 'BULLISH_FVG' && f.high < lastLtf);
-    if (buyOB) { zoneInfo = buyOB; zoneType = 'BULLISH_OB'; }
-    else if (buyFVG) { zoneInfo = buyFVG; zoneType = 'BULLISH_FVG'; }
-  }
-  if (sellSignal || (htfBias === 'RANGING' && !zoneInfo)) {
-    const sellOB = (ictA.orderBlocks || []).find(o => o.type === 'BEARISH_OB' && o.low > lastLtf);
-    const sellFVG = (ictA.fvgs || []).find(f => f.type === 'BEARISH_FVG' && f.low > lastLtf);
-    if (sellOB) { zoneInfo = sellOB; zoneType = 'BEARISH_OB'; }
-    else if (sellFVG) { zoneInfo = sellFVG; zoneType = 'BEARISH_FVG'; }
+  const taSignal = ta && typeof ta.signal === 'string' ? ta.signal : '';
+  const indicatorBias = htfBias === 'RANGING'
+    ? (taSignal.includes('BUY') ? 'BULLISH' : taSignal.includes('SELL') ? 'BEARISH' : 'RANGING')
+    : htfBias;
+  const ictCandidates = indicatorBias === 'BULLISH'
+    ? [
+        ...(ictA.orderBlocks || []).filter(o => o.type === 'BULLISH_OB' && o.high < lastLtf),
+        ...(ictA.fvgs || []).filter(f => f.type === 'BULLISH_FVG' && f.high < lastLtf)
+      ]
+    : indicatorBias === 'BEARISH'
+      ? [
+          ...(ictA.orderBlocks || []).filter(o => o.type === 'BEARISH_OB' && o.low > lastLtf),
+          ...(ictA.fvgs || []).filter(f => f.type === 'BEARISH_FVG' && f.low > lastLtf)
+        ]
+      : [];
+  const indicatorCandidates = getIndicatorZoneCandidates(ta, indicatorBias, lastLtf);
+  const zoneCandidates = [...ictCandidates, ...indicatorCandidates]
+    .map(zone => scoreZone(zone, indicatorBias, ta, normalizedPressure, confluenceAnalysisResult.methodAgreement))
+    .sort((a, b) => b.confluenceScore - a.confluenceScore);
+
+  if (zoneCandidates.length) {
+    zoneInfo = zoneCandidates[0];
+    zoneType = zoneInfo.type;
   }
 
   // 3. LTF: deteksi sweep
@@ -334,7 +469,7 @@ async function fullAnalysis(execTF, mode) {
 
   // 4. Entry direction
   const direction = zoneInfo
-    ? (zoneType.startsWith('BULLISH') ? 'BUY' : 'SELL')
+    ? (zoneInfo.direction || (zoneType.startsWith('BULLISH') ? 'BUY' : 'SELL'))
     : (htfBias === 'BULLISH' ? 'BUY' : htfBias === 'BEARISH' ? 'SELL' : 'NONE');
   // 5. Entry, SL, TP
   let entry, sl, tp1, tp2, slPips, tp1Pips, tp2Pips;
@@ -424,6 +559,8 @@ async function fullAnalysis(execTF, mode) {
     lastLtf,
     realtimePrice, high24h, low24h, open24h, change24h, changePct,
     dataSource: getLastDataSource(),
+    pressure: normalizedPressure,
+    confluenceAnalysis: confluenceAnalysisResult,
     ta
   };
 }
@@ -432,6 +569,12 @@ async function fullAnalysis(execTF, mode) {
 //  FORMAT OUTPUT
 // ======================================================
 function formatScalpingAnalysis(a) {
+  const methods = a.confluenceAnalysis || {};
+  const wyckoff = methods.wyckoff || {};
+  const vp = methods.volumeProfile || {};
+  const vwap = methods.vwap || {};
+  const mp = methods.marketProfile || {};
+  const ema = methods.emaConfluence || {};
   const biasReason = a.htfBias === 'BULLISH'
     ? `struktur H1 bullish (${a.htfStruct.structure}), harga berada di zona ${a.htfZone}`
     : a.htfBias === 'BEARISH'
@@ -444,8 +587,12 @@ function formatScalpingAnalysis(a) {
         ? 'bias H1 tidak jelas atau choppy'
         : 'belum ditemukan zona entry M5 yang valid searah bias H1';
     return `🚫 NO TRADE — XAUUSD, ${reason}.\n\n` +
-      `🕐 HTF BIAS H1: ${a.htfBias} — ${biasReason}.\n` +
-      `📉 LTF ZONA M5: belum valid; tunggu ${a.htfBias === 'BEARISH' ? 'supply' : 'demand'} searah bias.\n` +
+      `1. HTF BIAS H1\n   ${a.htfBias} — ${biasReason}.\n\n` +
+      `2. ENTRY ZONE M5\n   Belum valid; tunggu ${a.htfBias === 'BEARISH' ? 'supply' : 'demand'} searah bias.\n\n` +
+      `3. FLOW CONFIRMATION\n   ${formatPressure(a.pressure)}\n` +
+      `4. MARKET CONTEXT\n   Wyckoff: ${wyckoff.phase || 'N/A'} / ${wyckoff.event || 'NONE'}\n` +
+      `   VWAP: ${fmt(vwap.vwap)} | VPOC: ${fmt(vp.vpoc)}\n` +
+      `   20-METHOD AGREEMENT: ${formatMethodAgreement(methods.methodAgreement)}\n` +
       `⏳ Validasi ulang dalam 5 menit.\n` +
       `📝 CATATAN: scalping tidak boleh dipaksakan; cek kalender news high-impact dan spread secara manual.`;
   }
@@ -454,15 +601,44 @@ function formatScalpingAnalysis(a) {
   const zone = a.zoneInfo ? `${fmt(a.zoneInfo.low)} - ${fmt(a.zoneInfo.high)} (${a.zoneType})` : 'current price, tanpa OB/FVG valid';
   return `⚡ SCALPING SIGNAL\n` +
     `📊 PAIR: XAUUSD\n` +
-    `🕐 HTF BIAS H1: ${a.direction} — ${biasReason}; filter arah saja.\n` +
-    `📉 LTF ZONA M5: ${zone}\n` +
-    `🎯 ENTRY ZONE M5: ${fmt(a.zoneInfo.low)} - ${fmt(a.zoneInfo.high)}\n` +
-    `📖 NARATIF MTF: H1 memberi arah ${a.direction}; M5 menyediakan ${a.zoneType} sebagai area retracement untuk entry scalping.\n` +
+    `1. HTF BIAS H1\n` +
+    `   ${a.direction} — ${biasReason}; filter arah saja.\n\n` +
+    `2. ENTRY ZONE M5\n` +
+    `   ${zone}\n` +
+    `   Entry: ${fmt(a.zoneInfo?.low)} - ${fmt(a.zoneInfo?.high)}\n` +
+    `   Konfluensi: ${(a.zoneInfo?.confluence || []).join(', ') || 'belum ada'} (${a.zoneInfo?.confluenceScore || 0} faktor)\n` +
+    `   Narasi: H1 memberi arah ${a.direction}; M5 menyediakan ${a.zoneType} sebagai area retracement.\n\n` +
+    `3. FLOW CONFIRMATION\n` +
+    `   ${formatPressure(a.pressure)}\n\n` +
+    `4. MULTI-INDICATOR CHECK\n` +
+    `   20-method agreement: ${formatMethodAgreement(methods.methodAgreement)}\n` +
+    `   Wyckoff: ${wyckoff.phase || 'N/A'}${wyckoff.event && wyckoff.event !== 'NONE' ? ` / ${wyckoff.event}` : ''}\n` +
+    `   VPOC: ${fmt(vp.vpoc)} | Value Area: ${fmt(vp.valueAreaLow)} - ${fmt(vp.valueAreaHigh)}\n` +
+    `   VWAP: ${fmt(vwap.vwap)} | Bands: ${fmt(vwap.lower)} - ${fmt(vwap.upper)}\n` +
+    `   TPO/Market Profile: IB ${fmt(mp.initialBalanceLow)} - ${fmt(mp.initialBalanceHigh)} | POC ${fmt(mp.poc)}\n` +
+    `   Supply/Demand: ${methods.supplyDemand?.type || 'NONE'} | Harmonic: ${methods.harmonic?.pattern || 'NONE'}\n` +
+    `   Elliott: ${methods.elliott?.phase || 'N/A'} | EMA MTF: ${ema.H1?.direction || 'N/A'} / ${ema.M5?.direction || 'N/A'}\n\n` +
     `🛑 STOP LOSS: ${fmt(a.sl)} (–50 pips)\n` +
     `✅ TAKE PROFIT 1: ${fmt(a.tp1)} (${directionSign}50 pips, RR 1:1)\n` +
     `✅ TAKE PROFIT 2: ${fmt(a.tp2)} (${directionSign}75 pips, RR 1:1.5)\n` +
     `⏳ VALID SELAMA: 15-20 menit sejak sinyal dikirim\n` +
     `📝 CATATAN: time stop bila harga belum bergerak sesuai arah setelah 15-20 menit. Hindari 15 menit sebelum/sesudah news high-impact; kalender news belum terhubung otomatis.`;
+}
+
+function formatPressure(pressure) {
+  const p = pressure || {};
+  const bullish = Number(p.bullishPressure || 0);
+  const bearish = Number(p.bearishPressure || 0);
+  const net = Number(p.net || 0);
+  const netLabel = `${net >= 0 ? '+' : ''}${fmt(net, 2)}`;
+  const source = p.source || 'unavailable';
+  const note = p.note ? ` — ${p.note}` : '';
+  return `Bullish: ${bullish} | Bearish: ${bearish} | Net: ${netLabel}\n   Source: ${source}${note}`;
+}
+
+function formatMethodAgreement(agreement) {
+  const result = agreement || {};
+  return `${result.direction || 'MIXED'} (${result.buy || 0} BUY / ${result.sell || 0} SELL dari ${result.total || 0}, confidence ${result.confidence || 0}%)`;
 }
 
 function formatAnalysis(a) {
@@ -483,10 +659,11 @@ function formatAnalysis(a) {
   const rtLine = `   XAUUSD: $${fmt(a.realtimePrice)}`;
 
   const sourceName = typeof a.dataSource === 'string' ? a.dataSource : (a.dataSource && a.dataSource.source) || '';
-  const sourceLabel = sourceName || 'twelvedata';
+  const sourceLabel = sourceName || (a.pressure && a.pressure.source) || 'twelvedata';
   let delayInfo = '~15min delay';
   if (sourceLabel.startsWith('oanda')) delayInfo = 'real-time';
   else if (sourceLabel.startsWith('twelvedata')) delayInfo = '~15min delay';
+  else if (sourceLabel.startsWith('dukascopy')) delayInfo = 'real-time proxy';
 
   lines.push('💰 HARGA REAL-TIME');
   lines.push(rtLine);
@@ -494,12 +671,38 @@ function formatAnalysis(a) {
   lines.push(`   📊 24h High: $${fmt(a.high24h)} | Low: $${fmt(a.low24h)}`);
   lines.push(`   📏 Jarak ke High: ${distToHigh}% | ke Low: ${distToLow}%`);
   lines.push(`   📡 Source: ${sourceLabel} (${delayInfo})`);
+  const pressure = a.pressure || { bullishPressure: 0, bearishPressure: 0, net: 0, source: 'dukascopy-proxy' };
+  lines.push('   💧 PRESSURE CONFIRMATION');
+  lines.push(`      ${formatPressure(pressure)}`);
   lines.push('');
 
   const biasEmoji = a.htfBias === 'BULLISH' ? '🟢' : a.htfBias === 'BEARISH' ? '🔴' : '🟡';
   lines.push(`🔎 HTF BIAS (${a.htfTF}): ${biasEmoji} ${a.htfBias}`);
   lines.push(`   Struktur: ${a.htfStruct.structure}${a.htfStruct.lastSwing ? ' di level ' + fmt(a.htfStruct.lastSwing.price) : ''}`);
   lines.push(`   Zona: ${a.htfZone}`);
+  lines.push('');
+
+  const indicators = a.ta && a.ta.indicators ? a.ta.indicators : {};
+  lines.push('📐 KONFIRMASI INDIKATOR');
+  lines.push(`   Signal: ${a.ta?.signal || 'N/A'} (${a.ta?.confidence || 0}%)`);
+  lines.push(`   RSI: ${fmt(indicators.rsi, 1)} | MACD histogram: ${fmt(indicators.macd_hist, 2)}`);
+  lines.push(`   EMA trend: ${indicators.ema_trend || 'N/A'} | BB position: ${fmt(indicators.bb_pct, 2)}`);
+  lines.push(`   Support: ${fmt(a.ta?.supportNearest)} | Resistance: ${fmt(a.ta?.resistanceNearest)}`);
+  lines.push('');
+
+  const methods = a.confluenceAnalysis || {};
+  const vp = methods.volumeProfile || {};
+  const vwap = methods.vwap || {};
+  const mp = methods.marketProfile || {};
+  const wyckoff = methods.wyckoff || {};
+  lines.push('🧭 KONFLUENSI TAMBAHAN');
+  lines.push(`   Wyckoff: ${wyckoff.phase || 'N/A'} / ${wyckoff.event || 'NONE'}${wyckoff.volumeConfirmed ? ' / volume confirmed' : ''}`);
+  lines.push(`   Volume Profile: VPOC ${fmt(vp.vpoc)} | VA ${fmt(vp.valueAreaLow)} - ${fmt(vp.valueAreaHigh)}`);
+  lines.push(`   VWAP: ${fmt(vwap.vwap)} | dev bands ${fmt(vwap.lower)} - ${fmt(vwap.upper)}`);
+  lines.push(`   Market Profile: IB ${fmt(mp.initialBalanceLow)} - ${fmt(mp.initialBalanceHigh)} | POC ${fmt(mp.poc)}`);
+  lines.push(`   Supply/Demand: ${methods.supplyDemand?.type || 'NONE'} | Harmonic: ${methods.harmonic?.pattern || 'NONE'}`);
+  lines.push(`   Elliott: ${methods.elliott?.phase || 'N/A'} | EMA MTF H1/M5: ${methods.emaConfluence?.H1?.direction || 'N/A'}/${methods.emaConfluence?.M5?.direction || 'N/A'}`);
+  lines.push('   Macro: DXY/US10Y/real yield belum terhubung');
   lines.push('');
 
   if (a.zoneInfo) {
