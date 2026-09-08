@@ -619,7 +619,8 @@ function formatScalpingAnalysis(a) {
       : !a.confluenceAnalysis?.methodAgreement?.total
           ? 'belum ada metode yang menghasilkan signal valid'
         : 'belum ditemukan zona entry M5 yang valid searah bias H1';
-    return `🚫 NO TRADE — XAUUSD, ${reason}.\n\n` +
+    return `🚫 NO TRADE — XAUUSD, ${reason}.\n` +
+      `💰 HARGA SAAT INI: $${fmt(a.realtimePrice || a.lastLtf)}\n\n` +
       `1. 20-METHOD M5 DIRECTION\n   ${methodDirection}; H1 context: ${htfContext}.\n\n` +
       `2. ENTRY ZONE M5\n   Belum valid; tunggu zona berdasarkan level M5.\n\n` +
       `3. FLOW CONFIRMATION\n   ${formatPressure(a.pressure)}\n` +
@@ -634,6 +635,7 @@ function formatScalpingAnalysis(a) {
   const zone = a.zoneInfo ? `${fmt(a.zoneInfo.low)} - ${fmt(a.zoneInfo.high)} (${a.zoneType})` : 'current price, tanpa OB/FVG valid';
   return `⚡ SCALPING SIGNAL\n` +
     `📊 PAIR: XAUUSD\n` +
+    `💰 HARGA SAAT INI: $${fmt(a.realtimePrice || a.lastLtf)}\n` +
     `1. 20-METHOD M5 DIRECTION\n` +
     `   ${methodDirection}; H1 context: ${htfContext}.\n\n` +
     `2. ENTRY ZONE M5\n` +
