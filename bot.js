@@ -230,10 +230,36 @@ async function getPressureWithFallback(candleList) {
 //  STATE MANAGEMENT (per user step)
 // ======================================================
 const userState = {}; // { chatId: { step, tf, mode } }
+const signalSubscribers = new Set();
+let signalTimer = null;
 
 function setState(chatId, state) { userState[chatId] = { ...userState[chatId], ...state }; }
 function getState(chatId) { return userState[chatId] || {}; }
 function clearState(chatId) { delete userState[chatId]; }
+
+async function sendScalpingSignal(chatId) {
+  try {
+    const analysis = await fullAnalysis('5m', 'scalping');
+    const text = formatScalpingAnalysis(analysis);
+    await bot.sendMessage(chatId, text.length <= 4000 ? text : text.slice(0, 3990));
+  } catch (e) {
+    logger.error(`auto signal ${chatId}: ${e.message}`);
+  }
+}
+
+function startSignalTimer() {
+  if (signalTimer) return;
+  signalTimer = setInterval(async () => {
+    for (const chatId of signalSubscribers) await sendScalpingSignal(chatId);
+  }, 60 * 1000);
+}
+
+function stopSignalTimerIfUnused() {
+  if (signalSubscribers.size === 0 && signalTimer) {
+    clearInterval(signalTimer);
+    signalTimer = null;
+  }
+}
 
 // ======================================================
 //  KEYBOARDS
@@ -819,6 +845,8 @@ Bot analisa teknikal XAUUSD berbasis ICT/SMC + 5 konfluensi.
 /xauusd — Mulai analisa (pilih TF & mode)
 /help — Bantuan
 /status — Status bot & session
+/signal_on — Signal scalping M5 setiap 1 menit
+/signal_off — Hentikan signal otomatis
 /cancel — Batalkan analisa
 
 ⚠️ Bukan saran finansial. Gunakan MM.`;
@@ -835,6 +863,20 @@ bot.onText(/^\/help$/, (m) => {
 bot.onText(/^\/cancel$/, (m) => {
   clearState(m.chat.id);
   bot.sendMessage(m.chat.id, '❌ Analisa dibatalkan.');
+});
+
+bot.onText(/^\/signal_on$/, async (m) => {
+  const chatId = m.chat.id;
+  signalSubscribers.add(chatId);
+  startSignalTimer();
+  await bot.sendMessage(chatId, '✅ Signal scalping M5 otomatis aktif setiap 1 menit. Signal pertama dikirim sekarang.');
+  await sendScalpingSignal(chatId);
+});
+
+bot.onText(/^\/signal_off$/, async (m) => {
+  signalSubscribers.delete(m.chat.id);
+  stopSignalTimerIfUnused();
+  await bot.sendMessage(m.chat.id, '⏹ Signal otomatis dihentikan.');
 });
 
 const bootTime = Date.now();
