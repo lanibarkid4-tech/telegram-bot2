@@ -470,6 +470,85 @@ function seasonality(candles) {
   return { value: up / 10, direction: up >= 6 ? 'BUY' : up <= 4 ? 'SELL' : 'NEUTRAL' };
 }
 
+function adaptiveSwingLength(candles, base = 5, min = 3, max = 20) {
+  if (!candles || candles.length < 30) return base;
+  const ranges = candles.slice(-100).map(c => Number(c.high) - Number(c.low));
+  const current = average(ranges.slice(-14)) || 0;
+  const baseline = average(ranges) || current || 1;
+  const ratio = current / baseline;
+  return Math.max(min, Math.min(max, Math.round(base / Math.max(ratio, 0.1))));
+}
+
+function pivotStructure(candles) {
+  const length = adaptiveSwingLength(candles);
+  if (!candles || candles.length < length * 2 + 5) return { swingLength: length, trend: 'UNKNOWN', bos: null, choch: null };
+  const highs = [];
+  const lows = [];
+  for (let i = length; i < candles.length - length; i++) {
+    const high = Number(candles[i].high);
+    const low = Number(candles[i].low);
+    const left = candles.slice(i - length, i);
+    const right = candles.slice(i + 1, i + length + 1);
+    if (left.every(c => high > Number(c.high)) && right.every(c => high > Number(c.high))) highs.push({ index: i, price: high });
+    if (left.every(c => low < Number(c.low)) && right.every(c => low < Number(c.low))) lows.push({ index: i, price: low });
+  }
+  const last = candles[candles.length - 1];
+  const previousHigh = highs.length ? highs[highs.length - 1] : null;
+  const previousLow = lows.length ? lows[lows.length - 1] : null;
+  const priorHigh = highs.length > 1 ? highs[highs.length - 2] : null;
+  const priorLow = lows.length > 1 ? lows[lows.length - 2] : null;
+  const bullish = previousHigh && Number(last.close) > previousHigh.price;
+  const bearish = previousLow && Number(last.close) < previousLow.price;
+  const trend = priorHigh && priorLow && previousHigh && previousLow
+    ? (previousHigh.price > priorHigh.price && previousLow.price > priorLow.price ? 'BULLISH' : previousHigh.price < priorHigh.price && previousLow.price < priorLow.price ? 'BEARISH' : 'RANGING')
+    : 'RANGING';
+  return {
+    swingLength: length,
+    trend,
+    bos: bullish ? { direction: 'BUY', level: previousHigh.price } : bearish ? { direction: 'SELL', level: previousLow.price } : null,
+    choch: bullish && trend === 'BEARISH' ? { direction: 'BUY', level: previousHigh.price } : bearish && trend === 'BULLISH' ? { direction: 'SELL', level: previousLow.price } : null,
+    swingHigh: previousHigh,
+    swingLow: previousLow
+  };
+}
+
+function historicalExpectancy(candles, direction, entry, stop) {
+  if (!candles || candles.length < 25 || !finite(entry) || !finite(stop)) return 0;
+  const risk = Math.abs(entry - stop) || 0.01;
+  const outcomes = [];
+  for (let i = 5; i < candles.length - 5; i++) {
+    const move = direction === 'BUY'
+      ? Number(candles[i + 5].close) - Number(candles[i].close)
+      : Number(candles[i].close) - Number(candles[i + 5].close);
+    outcomes.push(move / risk);
+  }
+  return outcomes.length ? average(outcomes.slice(-20)) : 0;
+}
+
+function validateZone(zone, candles, direction, htfDirection = 'RANGING') {
+  if (!zone || !candles || !candles.length) return { score: 0, valid: false, reasons: [] };
+  const recent = candles.slice(-20);
+  const volumeAverage = average(recent.slice(0, -1).map(c => Number(c.volume) || 0)) || 1;
+  const sourceCandle = candles[Math.max(0, Math.min(candles.length - 1, zone.index || candles.length - 2))];
+  const volumeRatio = Number(sourceCandle.volume || 0) / volumeAverage;
+  const rangeAverage = average(recent.map(c => Number(c.high) - Number(c.low))) || 1;
+  const zoneSize = Math.abs(Number(zone.high) - Number(zone.low));
+  const sizeRatio = zoneSize / rangeAverage;
+  const sizeScore = Math.max(0, 100 - Math.abs(sizeRatio - 1) * 60);
+  const volumeScore = Math.min(100, volumeRatio * 50);
+  const expectancy = historicalExpectancy(candles, direction, zone.midpoint, direction === 'BUY' ? zone.low : zone.high);
+  const expectancyScore = Math.max(0, Math.min(100, 50 + expectancy * 25));
+  const structure = pivotStructure(candles);
+  const structureScore = htfDirection === direction || structure.bos?.direction === direction || structure.choch?.direction === direction ? 100 : 30;
+  const score = Math.round((volumeScore + sizeScore + expectancyScore + structureScore) / 4);
+  const reasons = [];
+  if (volumeScore >= 60) reasons.push('volume impulse');
+  if (sizeScore >= 60) reasons.push('ATR-sized zone');
+  if (expectancyScore >= 55) reasons.push('positive expectancy');
+  if (structureScore >= 100) reasons.push('BOS/CHoCH aligned');
+  return { score, valid: score >= 50, volumeRatio, sizeRatio, expectancy, structure, reasons };
+}
+
 function additionalMethods(candles) {
   return {
     atr: { value: atr(candles), direction: 'NEUTRAL' },
@@ -521,8 +600,9 @@ function analyzeConfluence({ candles, timeframes, ta, pressure }) {
     pressure: pressure || null,
     additionalMethods: additional,
     methodAgreement: methodAgreement(additional),
+    pineFusion: pivotStructure(candles),
     ta: ta || null
   };
 }
 
-module.exports = { analyzeConfluence, volumeProfile, vwapBands, marketProfile, wyckoff, supplyDemand, harmonic, elliott, emaConfluence, additionalMethods, methodAgreement, movingAverageMethods, movingAverageStructure, movingAverageRibbon };
+module.exports = { analyzeConfluence, volumeProfile, vwapBands, marketProfile, wyckoff, supplyDemand, harmonic, elliott, emaConfluence, additionalMethods, methodAgreement, movingAverageMethods, movingAverageStructure, movingAverageRibbon, validateZone };

@@ -138,9 +138,11 @@ function getIndicatorZoneCandidates(ta, bias, price) {
   }));
 }
 
-function scoreZone(zone, bias, ta, pressure, methodAgreement) {
+function scoreZone(zone, bias, ta, pressure, methodAgreement, candles) {
   const indicators = ta && ta.indicators ? ta.indicators : {};
   const bullish = bias === 'BULLISH';
+  const direction = bullish ? 'BUY' : 'SELL';
+  const zoneValidation = confluenceAnalysis.validateZone(zone, candles, direction, 'RANGING');
   const score = {
     htfDirection: 2,
     technicalZone: zone.source === 'technical-indicator' ? 1 : 0,
@@ -154,7 +156,9 @@ function scoreZone(zone, bias, ta, pressure, methodAgreement) {
   return {
     ...zone,
     confluence: Object.entries(score).filter(([, ok]) => ok === true).map(([name]) => name),
-    confluenceScore: Object.values(score).filter(Boolean).length
+    confluenceScore: Object.values(score).filter(Boolean).length,
+    zoneValidation,
+    totalZoneScore: Object.values(score).filter(Boolean).length * 10 + zoneValidation.score
   };
 }
 
@@ -490,8 +494,8 @@ async function fullAnalysis(execTF, mode) {
   const indicatorCandidates = getIndicatorZoneCandidates(ta, indicatorBias, lastLtf);
   const methodZone = getTwentyMethodZone(confluenceAnalysisResult, methodDirection, lastLtf, ta.atr);
   const zoneCandidates = [...ictCandidates, ...indicatorCandidates, ...(methodZone ? [methodZone] : [])]
-    .map(zone => scoreZone(zone, indicatorBias, ta, normalizedPressure, confluenceAnalysisResult.methodAgreement))
-    .sort((a, b) => b.confluenceScore - a.confluenceScore);
+    .map(zone => scoreZone(zone, indicatorBias, ta, normalizedPressure, confluenceAnalysisResult.methodAgreement, mid))
+    .sort((a, b) => b.totalZoneScore - a.totalZoneScore);
 
   if (zoneCandidates.length) {
     zoneInfo = zoneCandidates[0];
@@ -614,6 +618,7 @@ function formatScalpingAnalysis(a) {
   const maFamily = methods.additionalMethods?.movingAverageFamily || {};
   const maStructure = methods.additionalMethods?.movingAverageStructure || {};
   const maRibbon = methods.additionalMethods?.movingAverageRibbon || {};
+  const pineFusion = methods.pineFusion || {};
   const methodDirection = methods.methodAgreement?.direction || a.direction || 'MIXED';
   const htfContext = `${a.htfBias} (${a.htfStruct.structure})`;
   if (a.scalpNoTrade) {
@@ -646,6 +651,8 @@ function formatScalpingAnalysis(a) {
     `   ${zone}\n` +
     `   Entry: ${fmt(a.zoneInfo?.low)} - ${fmt(a.zoneInfo?.high)}\n` +
     `   Basis zona: ${a.zoneInfo?.source || 'ICT/SMC'}${a.zoneInfo?.levelSources ? ` (${a.zoneInfo.levelSources.join(', ')})` : ''}\n` +
+    `   Pine Fusion: ${pineFusion.trend || 'N/A'} | BOS ${pineFusion.bos?.direction || '-'} | CHoCH ${pineFusion.choch?.direction || '-'}\n` +
+    `   Validasi zona: ${a.zoneInfo?.zoneValidation?.score || 0}/100${a.zoneInfo?.zoneValidation?.reasons?.length ? ` (${a.zoneInfo.zoneValidation.reasons.join(', ')})` : ''}\n` +
     `   Konfluensi: ${(a.zoneInfo?.confluence || []).join(', ') || 'belum ada'} (${a.zoneInfo?.confluenceScore || 0} faktor)\n` +
     `   Narasi: ${methodDirection} dipilih dari hasil 20 metode; level M5 menjadi area retracement/scalping.\n\n` +
     `3. FLOW CONFIRMATION\n` +
