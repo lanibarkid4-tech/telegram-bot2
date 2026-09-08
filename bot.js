@@ -266,7 +266,7 @@ function getSession() {
 async function fullAnalysis(execTF, mode) {
   // Mapping TF
   const tfMap = { '1m': '1min', '5m': '5min', '15m': '15min', '30m': '30min', '1h': '1h', '4h': '4h', '1day': '1day' };
-  const tfInternal = mode === 'scalping' ? '1min' : (tfMap[execTF] || '15min');
+  const tfInternal = mode === 'scalping' ? '5min' : (tfMap[execTF] || '15min');
 
   // Pilih HTF bias & mid TF berdasarkan mode
   let htfTF, midTF;
@@ -336,21 +336,11 @@ async function fullAnalysis(execTF, mode) {
   const direction = zoneInfo
     ? (zoneType.startsWith('BULLISH') ? 'BUY' : 'SELL')
     : (htfBias === 'BULLISH' ? 'BUY' : htfBias === 'BEARISH' ? 'SELL' : 'NONE');
-  const ltfPrev = ltf[ltf.length - 2];
-  const ltfLast = ltf[ltf.length - 1];
-  const bullishTrigger = ltfLast && ltfPrev && ltfLast.close > ltfLast.open && ltfLast.close > ltfPrev.high;
-  const bearishTrigger = ltfLast && ltfPrev && ltfLast.close < ltfLast.open && ltfLast.close < ltfPrev.low;
-  const m1Trigger = direction === 'BUY' && bullishTrigger
-    ? 'Bullish candle + break struktur mikro (BOS)'
-    : direction === 'SELL' && bearishTrigger
-      ? 'Bearish candle + break struktur mikro (BOS)'
-      : null;
-
   // 5. Entry, SL, TP
   let entry, sl, tp1, tp2, slPips, tp1Pips, tp2Pips;
   const scalpDistance = 0.50;
   const newsBlocked = mode === 'scalping' && process.env.HIGH_IMPACT_NEWS === 'true';
-  const scalpNoTrade = mode === 'scalping' && (htfBias === 'RANGING' || !m1Trigger || newsBlocked);
+  const scalpNoTrade = mode === 'scalping' && (htfBias === 'RANGING' || !zoneInfo || newsBlocked);
   if (zoneInfo) {
     entry = zoneInfo.midpoint || zoneInfo.price;
     if (mode === 'scalping') {
@@ -429,7 +419,7 @@ async function fullAnalysis(execTF, mode) {
     midTF, htfTF,
     ltfSweeps, ltfStruct,
     confluence, score, probability,
-    scalpNoTrade, newsBlocked, m1Trigger,
+    scalpNoTrade, newsBlocked,
     invalidation, wibStr,
     lastLtf,
     realtimePrice, high24h, low24h, open24h, change24h, changePct,
@@ -443,20 +433,19 @@ async function fullAnalysis(execTF, mode) {
 // ======================================================
 function formatScalpingAnalysis(a) {
   const biasReason = a.htfBias === 'BULLISH'
-    ? 'struktur bullish H1'
+    ? `struktur H1 bullish (${a.htfStruct.structure}), harga berada di zona ${a.htfZone}`
     : a.htfBias === 'BEARISH'
-      ? 'struktur bearish H1'
+      ? `struktur H1 bearish (${a.htfStruct.structure}), harga berada di zona ${a.htfZone}`
       : 'struktur H1 sideways/choppy';
   if (a.scalpNoTrade) {
     const reason = a.newsBlocked
       ? 'ada indikasi news high-impact; hindari 15 menit sebelum/sesudah rilis'
       : a.htfBias === 'RANGING'
         ? 'bias H1 tidak jelas atau choppy'
-        : 'trigger M1 belum terkonfirmasi searah bias H1';
+        : 'belum ditemukan zona entry M5 yang valid searah bias H1';
     return `🚫 NO TRADE — XAUUSD, ${reason}.\n\n` +
-      `🕐 BIAS H1: ${a.htfBias} — ${biasReason}.\n` +
-      `📉 STRUKTUR M5: tunggu zona ${a.htfBias === 'BEARISH' ? 'supply' : 'demand'} yang searah bias.\n` +
-      `⏱️ TRIGGER M1: belum valid.\n` +
+      `🕐 HTF BIAS H1: ${a.htfBias} — ${biasReason}.\n` +
+      `📉 LTF ZONA M5: belum valid; tunggu ${a.htfBias === 'BEARISH' ? 'supply' : 'demand'} searah bias.\n` +
       `⏳ Validasi ulang dalam 5 menit.\n` +
       `📝 CATATAN: scalping tidak boleh dipaksakan; cek kalender news high-impact dan spread secara manual.`;
   }
@@ -465,10 +454,10 @@ function formatScalpingAnalysis(a) {
   const zone = a.zoneInfo ? `${fmt(a.zoneInfo.low)} - ${fmt(a.zoneInfo.high)} (${a.zoneType})` : 'current price, tanpa OB/FVG valid';
   return `⚡ SCALPING SIGNAL\n` +
     `📊 PAIR: XAUUSD\n` +
-    `🕐 BIAS H1: ${a.direction} — ${biasReason}; filter arah saja.\n` +
-    `📉 STRUKTUR M5: ${zone}\n` +
-    `⏱️ TRIGGER M1: ${a.m1Trigger}\n` +
-    `🎯 ENTRY ZONE: ${fmt(a.entry)} (range sempit, eksekusi cepat)\n` +
+    `🕐 HTF BIAS H1: ${a.direction} — ${biasReason}; filter arah saja.\n` +
+    `📉 LTF ZONA M5: ${zone}\n` +
+    `🎯 ENTRY ZONE M5: ${fmt(a.zoneInfo.low)} - ${fmt(a.zoneInfo.high)}\n` +
+    `📖 NARATIF MTF: H1 memberi arah ${a.direction}; M5 menyediakan ${a.zoneType} sebagai area retracement untuk entry scalping.\n` +
     `🛑 STOP LOSS: ${fmt(a.sl)} (–50 pips)\n` +
     `✅ TAKE PROFIT 1: ${fmt(a.tp1)} (${directionSign}50 pips, RR 1:1)\n` +
     `✅ TAKE PROFIT 2: ${fmt(a.tp2)} (${directionSign}75 pips, RR 1:1.5)\n` +
