@@ -611,6 +611,9 @@ function formatScalpingAnalysis(a) {
   const vwap = methods.vwap || {};
   const mp = methods.marketProfile || {};
   const ema = methods.emaConfluence || {};
+  const maFamily = methods.additionalMethods?.movingAverageFamily || {};
+  const maStructure = methods.additionalMethods?.movingAverageStructure || {};
+  const maRibbon = methods.additionalMethods?.movingAverageRibbon || {};
   const methodDirection = methods.methodAgreement?.direction || a.direction || 'MIXED';
   const htfContext = `${a.htfBias} (${a.htfStruct.structure})`;
   if (a.scalpNoTrade) {
@@ -627,6 +630,7 @@ function formatScalpingAnalysis(a) {
       `4. MARKET CONTEXT\n   Wyckoff: ${wyckoff.phase || 'N/A'} / ${wyckoff.event || 'NONE'}\n` +
       `   VWAP: ${fmt(vwap.vwap)} | VPOC: ${fmt(vp.vpoc)}\n` +
       `   20-METHOD AGREEMENT: ${formatMethodAgreement(methods.methodAgreement)}\n` +
+      `   MA: ${maFamily.direction || 'N/A'} | Cross: ${maStructure.cross || 'N/A'} | Ribbon: ${maRibbon.alignment || 'N/A'}\n` +
       `⏳ Validasi ulang dalam 5 menit.\n` +
       `📝 CATATAN: scalping tidak boleh dipaksakan; cek kalender news high-impact dan spread secara manual.`;
   }
@@ -654,6 +658,7 @@ function formatScalpingAnalysis(a) {
     `   TPO/Market Profile: IB ${fmt(mp.initialBalanceLow)} - ${fmt(mp.initialBalanceHigh)} | POC ${fmt(mp.poc)}\n` +
     `   Supply/Demand: ${methods.supplyDemand?.type || 'NONE'} | Harmonic: ${methods.harmonic?.pattern || 'NONE'}\n` +
     `   Elliott: ${methods.elliott?.phase || 'N/A'} | EMA MTF: ${ema.H1?.direction || 'N/A'} / ${ema.M5?.direction || 'N/A'}\n\n` +
+    `   MA family: ${maFamily.direction || 'N/A'} | 50/200: ${maStructure.cross || 'N/A'} | Ribbon 8-13-21-34-55: ${maRibbon.alignment || 'N/A'}\n\n` +
     `🛑 STOP LOSS: ${fmt(a.sl)} (–50 pips)\n` +
     `✅ TAKE PROFIT 1: ${fmt(a.tp1)} (${directionSign}50 pips, RR 1:1)\n` +
     `✅ TAKE PROFIT 2: ${fmt(a.tp2)} (${directionSign}75 pips, RR 1:1.5)\n` +

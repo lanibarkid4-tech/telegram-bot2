@@ -21,6 +21,137 @@ function ema(candles, period) {
   return value;
 }
 
+function emaSeries(candles, period) {
+  if (!candles || candles.length < period) return [];
+  const values = candles.map(c => Number(c.close));
+  const result = Array(period - 1).fill(null);
+  let value = average(values.slice(0, period));
+  result.push(value);
+  const k = 2 / (period + 1);
+  for (let i = period; i < values.length; i++) {
+    value = values[i] * k + value * (1 - k);
+    result.push(value);
+  }
+  return result;
+}
+
+function sma(candles, period) {
+  if (!candles || candles.length < period) return null;
+  return average(candles.slice(-period).map(c => Number(c.close)));
+}
+
+function wma(candles, period) {
+  if (!candles || candles.length < period) return null;
+  const values = candles.slice(-period).map(c => Number(c.close));
+  const denominator = period * (period + 1) / 2;
+  return values.reduce((sum, value, index) => sum + value * (index + 1), 0) / denominator;
+}
+
+function rma(candles, period) {
+  if (!candles || candles.length < period) return null;
+  const values = candles.map(c => Number(c.close));
+  let result = average(values.slice(0, period));
+  for (let i = period; i < values.length; i++) result = (result * (period - 1) + values[i]) / period;
+  return result;
+}
+
+function hma(candles, period = 20) {
+  if (!candles || candles.length < period) return null;
+  const half = Math.max(2, Math.floor(period / 2));
+  const full = wma(candles, period);
+  const halfValue = wma(candles, half);
+  if (full === null || halfValue === null) return null;
+  return 2 * halfValue - full;
+}
+
+function dema(candles, period = 21) {
+  const firstSeries = emaSeries(candles, period).filter(finite).map(close => ({ close }));
+  const first = firstSeries.length ? firstSeries[firstSeries.length - 1].close : null;
+  const second = ema(firstSeries, period);
+  return first === null || second === null ? null : 2 * first - second;
+}
+
+function tema(candles, period = 21) {
+  const firstSeries = emaSeries(candles, period).filter(finite).map(close => ({ close }));
+  const first = firstSeries.length ? firstSeries[firstSeries.length - 1].close : null;
+  const secondSeries = emaSeries(firstSeries, period).filter(finite).map(close => ({ close }));
+  const second = secondSeries.length ? secondSeries[secondSeries.length - 1].close : null;
+  const third = ema(secondSeries, period);
+  return first === null || second === null || third === null ? null : 3 * first - 3 * second + third;
+}
+
+function vwma(candles, period = 20) {
+  if (!candles || candles.length < period) return null;
+  const recent = candles.slice(-period);
+  const volume = recent.reduce((sum, c) => sum + (Number(c.volume) || 0), 0);
+  if (!volume) return sma(candles, period);
+  return recent.reduce((sum, c) => sum + Number(c.close) * (Number(c.volume) || 0), 0) / volume;
+}
+
+function kama(candles, period = 10, fast = 2, slow = 30) {
+  if (!candles || candles.length < period + 1) return null;
+  const values = candles.map(c => Number(c.close));
+  let result = values[period - 1];
+  for (let i = period; i < values.length; i++) {
+    const change = Math.abs(values[i] - values[i - period]);
+    let volatility = 0;
+    for (let j = i - period + 1; j <= i; j++) volatility += Math.abs(values[j] - values[j - 1]);
+    const efficiency = volatility ? change / volatility : 0;
+    const fastSc = 2 / (fast + 1);
+    const slowSc = 2 / (slow + 1);
+    const smoothing = Math.pow(efficiency * (fastSc - slowSc) + slowSc, 2);
+    result += smoothing * (values[i] - result);
+  }
+  return result;
+}
+
+function movingAverageMethods(candles) {
+  const close = candles && candles.length ? Number(candles[candles.length - 1].close) : null;
+  const values = {
+    sma21: sma(candles, 21),
+    ema21: ema(candles, 21),
+    wma21: wma(candles, 21),
+    rma21: rma(candles, 21),
+    hma21: hma(candles, 21),
+    dema21: dema(candles, 21),
+    tema21: tema(candles, 21),
+    vwma21: vwma(candles, 21),
+    kama10: kama(candles, 10)
+  };
+  const votes = Object.values(values).filter(finite);
+  const above = votes.filter(value => close > value).length;
+  const below = votes.filter(value => close < value).length;
+  return { ...values, direction: above > below ? 'BUY' : below > above ? 'SELL' : 'NEUTRAL' };
+}
+
+function movingAverageStructure(candles) {
+  if (!candles || candles.length < 200) return { direction: 'UNKNOWN', cross: 'INSUFFICIENT_DATA' };
+  const close = Number(candles[candles.length - 1].close);
+  const ema50 = ema(candles, 50);
+  const ema200 = ema(candles, 200);
+  const previous = candles.slice(0, -1);
+  const previous50 = ema(previous, 50);
+  const previous200 = ema(previous, 200);
+  const bullishCross = previous50 <= previous200 && ema50 > ema200;
+  const bearishCross = previous50 >= previous200 && ema50 < ema200;
+  return {
+    ema50,
+    ema200,
+    cross: bullishCross ? 'GOLDEN_CROSS' : bearishCross ? 'DEATH_CROSS' : 'NONE',
+    direction: close > ema50 && ema50 > ema200 ? 'BUY' : close < ema50 && ema50 < ema200 ? 'SELL' : 'MIXED'
+  };
+}
+
+function movingAverageRibbon(candles) {
+  const periods = [8, 13, 21, 34, 55];
+  const lines = periods.map(period => ({ period, value: ema(candles, period) }));
+  const valid = lines.every(line => line.value !== null);
+  if (!valid) return { lines, direction: 'UNKNOWN', alignment: 'INCOMPLETE' };
+  const bullish = lines.every((line, index) => index === 0 || lines[index - 1].value > line.value);
+  const bearish = lines.every((line, index) => index === 0 || lines[index - 1].value < line.value);
+  return { lines, direction: bullish ? 'BUY' : bearish ? 'SELL' : 'MIXED', alignment: bullish ? 'BULLISH' : bearish ? 'BEARISH' : 'MIXED' };
+}
+
 function priceBins(candles, bins = 24) {
   const low = Math.min(...candles.map(c => Number(c.low)));
   const high = Math.max(...candles.map(c => Number(c.high)));
@@ -360,7 +491,10 @@ function additionalMethods(candles) {
     supportResistance: supportResistance(candles),
     meanReversion: meanReversion(candles),
     seasonality: seasonality(candles),
-    priceAction: candlePattern(candles)
+    priceAction: candlePattern(candles),
+    movingAverageFamily: movingAverageMethods(candles),
+    movingAverageStructure: movingAverageStructure(candles),
+    movingAverageRibbon: movingAverageRibbon(candles)
   };
 }
 
@@ -391,4 +525,4 @@ function analyzeConfluence({ candles, timeframes, ta, pressure }) {
   };
 }
 
-module.exports = { analyzeConfluence, volumeProfile, vwapBands, marketProfile, wyckoff, supplyDemand, harmonic, elliott, emaConfluence, additionalMethods, methodAgreement };
+module.exports = { analyzeConfluence, volumeProfile, vwapBands, marketProfile, wyckoff, supplyDemand, harmonic, elliott, emaConfluence, additionalMethods, methodAgreement, movingAverageMethods, movingAverageStructure, movingAverageRibbon };
