@@ -571,7 +571,6 @@ async function fullAnalysis(execTF, mode) {
   const scalpDistance = 0.50;
   const newsBlocked = mode === 'scalping' && process.env.HIGH_IMPACT_NEWS === 'true';
   const methodSignalAvailable = confluenceAnalysisResult.methodAgreement && confluenceAnalysisResult.methodAgreement.total > 0;
-  const scalpNoTrade = mode === 'scalping' && (!zoneInfo || newsBlocked || !methodSignalAvailable || !['BUY', 'SELL'].includes(methodDirection));
   if (zoneInfo) {
     entry = zoneInfo.midpoint || zoneInfo.price;
     if (mode === 'scalping') {
@@ -610,6 +609,21 @@ async function fullAnalysis(execTF, mode) {
   slPips = Math.round(Math.abs(entry - sl) / 0.01);
   tp1Pips = Math.round(Math.abs(tp1 - entry) / 0.01);
   tp2Pips = Math.round(Math.abs(tp2 - entry) / 0.01);
+
+  const methodConfidence = confluenceAnalysisResult.methodAgreement?.confidence || 0;
+  const pressureAligned = direction === 'BUY' ? normalizedPressure.net > 0 : direction === 'SELL' ? normalizedPressure.net < 0 : false;
+  const zoneScore = zoneInfo?.zoneValidation?.score || 0;
+  const forcedNearPrice = zoneInfo?.type === 'M5_NEAR_PRICE_PULLBACK';
+  const signalQuality = {
+    methodConfidence,
+    zoneScore,
+    pressureAligned,
+    forcedNearPrice,
+    valid: mode !== 'scalping' || (
+      direction !== 'NONE' && methodConfidence >= 55 && zoneScore >= 60 && !forcedNearPrice && pressureAligned
+    )
+  };
+  const scalpNoTrade = mode === 'scalping' && (!zoneInfo || newsBlocked || !methodSignalAvailable || !['BUY', 'SELL'].includes(methodDirection) || !signalQuality.valid);
 
   // 6. CONFLUENCE SCORING
   const confluence = {
@@ -656,6 +670,7 @@ async function fullAnalysis(execTF, mode) {
     realtimePrice, high24h, low24h, open24h, change24h, changePct,
     dataSource: getLastDataSource(),
     pressure: normalizedPressure,
+    signalQuality,
     confluenceAnalysis: confluenceAnalysisResult,
     ta
   };
@@ -682,13 +697,16 @@ function formatScalpingAnalysis(a) {
       ? 'ada indikasi news high-impact; hindari 15 menit sebelum/sesudah rilis'
       : !a.confluenceAnalysis?.methodAgreement?.total
           ? 'belum ada metode yang menghasilkan signal valid'
+        : !a.signalQuality?.valid
+          ? `setup belum cukup kuat (zone ${a.signalQuality?.zoneScore || 0}/100, pressure ${a.signalQuality?.pressureAligned ? 'aligned' : 'belum aligned'})`
         : 'belum ditemukan zona entry M5 yang valid searah bias H1';
     return `🚫 NO TRADE — XAUUSD, ${reason}.\n` +
       `💰 HARGA SAAT INI: $${fmt(a.realtimePrice || a.lastLtf)}\n\n` +
       `1. 20-METHOD M5 DIRECTION\n   ${methodDirection}; H1 context: ${htfContext}.\n\n` +
       `2. ENTRY ZONE M5\n   Belum valid; tunggu zona berdasarkan level M5.\n\n` +
       `3. FLOW CONFIRMATION\n   ${formatPressure(a.pressure)}\n` +
-      `4. MARKET CONTEXT\n   Wyckoff: ${wyckoff.phase || 'N/A'} / ${wyckoff.event || 'NONE'}\n` +
+      `4. QUALITY CHECK\n   Zone ${a.signalQuality?.zoneScore || 0}/100 | Method ${a.signalQuality?.methodConfidence || 0}% | Pressure ${a.signalQuality?.pressureAligned ? 'ALIGNED' : 'WAIT'}\n` +
+      `5. MARKET CONTEXT\n   Wyckoff: ${wyckoff.phase || 'N/A'} / ${wyckoff.event || 'NONE'}\n` +
       `   VWAP: ${fmt(vwap.vwap)} | VPOC: ${fmt(vp.vpoc)}\n` +
       `   20-METHOD AGREEMENT: ${formatMethodAgreement(methods.methodAgreement)}\n` +
       `   MA: ${maFamily.direction || 'N/A'} | Cross: ${maStructure.cross || 'N/A'} | Ribbon: ${maRibbon.alignment || 'N/A'}\n` +
@@ -713,7 +731,9 @@ function formatScalpingAnalysis(a) {
     `   Narasi: ${methodDirection} dipilih dari hasil 20 metode; level M5 menjadi area retracement/scalping.\n\n` +
     `3. FLOW CONFIRMATION\n` +
     `   ${formatPressure(a.pressure)}\n\n` +
-    `4. MULTI-INDICATOR CHECK\n` +
+    `4. QUALITY CHECK\n` +
+    `   Zone ${a.signalQuality?.zoneScore || 0}/100 | Method ${a.signalQuality?.methodConfidence || 0}% | Pressure ${a.signalQuality?.pressureAligned ? 'ALIGNED' : 'WAIT'}\n\n` +
+    `5. MULTI-INDICATOR CHECK\n` +
     `   20-method agreement: ${formatMethodAgreement(methods.methodAgreement)}\n` +
     `   Wyckoff: ${wyckoff.phase || 'N/A'}${wyckoff.event && wyckoff.event !== 'NONE' ? ` / ${wyckoff.event}` : ''}\n` +
     `   VPOC: ${fmt(vp.vpoc)} | Value Area: ${fmt(vp.valueAreaLow)} - ${fmt(vp.valueAreaHigh)}\n` +
