@@ -770,8 +770,10 @@ function formatPressure(pressure) {
 
 function formatMethodReports(reports) {
   if (!reports || !reports.length) return 'Belum tersedia';
-  return reports.map(report => `   ${report.label}: ${report.signal} (${report.probability}%)`).join('\n');
+  return reports.slice(0, 20).map((report, index) => `${String(index + 1).padStart(2, '0')}. ${report.label}: ${report.signal} (${report.probability}%)`).join('\n');
 }
+  `\n20 METODE TEKNIKAL (individual signal)\n${formatMethodReports(methods.methodReports)}\n` +
+  `   20 METODE TEKNIKAL (individual signal)\n${formatMethodReports(methods.methodReports)}\n` +
 
 function formatMethodAgreement(agreement) {
   const result = agreement || {};
