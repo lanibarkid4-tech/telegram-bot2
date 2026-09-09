@@ -574,16 +574,15 @@ async function fullAnalysis(execTF, mode) {
     : (methodDirection === 'BUY' || methodDirection === 'SELL' ? methodDirection : 'NONE');
   // 5. Entry, SL, TP
   let entry, sl, tp1, tp2, slPips, tp1Pips, tp2Pips;
-  const scalpBuffer = Math.max(m5Atr * 0.25, 0.20);
+  const scalpRisk = 0.50;
   const newsBlocked = mode === 'scalping' && process.env.HIGH_IMPACT_NEWS === 'true';
   const methodSignalAvailable = confluenceAnalysisResult.methodAgreement && confluenceAnalysisResult.methodAgreement.total > 0;
   if (zoneInfo) {
     entry = zoneInfo.midpoint || zoneInfo.price;
     if (mode === 'scalping') {
-      sl = direction === 'BUY' ? zoneInfo.low - scalpBuffer : zoneInfo.high + scalpBuffer;
-      const risk = Math.abs(entry - sl);
-      tp1 = direction === 'BUY' ? entry + risk * 1.5 : entry - risk * 1.5;
-      tp2 = direction === 'BUY' ? entry + risk * 2.5 : entry - risk * 2.5;
+      sl = direction === 'BUY' ? entry - scalpRisk : entry + scalpRisk;
+      tp1 = direction === 'BUY' ? entry + scalpRisk * 1.5 : entry - scalpRisk * 1.5;
+      tp2 = direction === 'BUY' ? entry + scalpRisk * 2.5 : entry - scalpRisk * 2.5;
     } else if (direction === 'BUY') {
       sl = zoneInfo.low - 0.50;
       const slDist = entry - sl;
@@ -599,10 +598,9 @@ async function fullAnalysis(execTF, mode) {
     // Fallback: pakai current price
     entry = lastLtf;
     if (mode === 'scalping') {
-      sl = direction === 'BUY' ? entry - scalpBuffer : entry + scalpBuffer;
-      const risk = Math.abs(entry - sl);
-      tp1 = direction === 'BUY' ? entry + risk * 1.5 : entry - risk * 1.5;
-      tp2 = direction === 'BUY' ? entry + risk * 2.5 : entry - risk * 2.5;
+      sl = direction === 'BUY' ? entry - scalpRisk : entry + scalpRisk;
+      tp1 = direction === 'BUY' ? entry + scalpRisk * 1.5 : entry - scalpRisk * 1.5;
+      tp2 = direction === 'BUY' ? entry + scalpRisk * 2.5 : entry - scalpRisk * 2.5;
     } else if (direction === 'BUY') {
       sl = entry - 0.50;
       tp1 = entry + 0.75;
