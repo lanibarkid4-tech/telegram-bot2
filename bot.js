@@ -736,6 +736,11 @@ function formatScalpingAnalysis(a) {
     `   Validasi zona: ${a.zoneInfo?.zoneValidation?.score || 0}/100${a.zoneInfo?.zoneValidation?.reasons?.length ? ` (${a.zoneInfo.zoneValidation.reasons.join(', ')})` : ''}\n` +
     `   Konfluensi: ${(a.zoneInfo?.confluence || []).join(', ') || 'belum ada'} (${a.zoneInfo?.confluenceScore || 0} faktor)\n` +
     `   Narasi: ${methodDirection} dipilih dari hasil 20 metode; level M5 menjadi area retracement/scalping.\n\n` +
+    `🛑 STOP LOSS: ${fmt(a.sl)} (–${a.slPips} pips)\n` +
+    `✅ TAKE PROFIT 1: ${fmt(a.tp1)} (${directionSign}${a.tp1Pips} pips, RR 1:1.5)\n` +
+    `✅ TAKE PROFIT 2: ${fmt(a.tp2)} (${directionSign}${a.tp2Pips} pips, RR 1:2.5)\n` +
+    `⏳ VALID SELAMA: 15-20 menit sejak sinyal dikirim\n` +
+    `📝 CATATAN: time stop bila harga belum bergerak sesuai arah setelah 15-20 menit. Hindari 15 menit sebelum/sesudah news high-impact; kalender news belum terhubung otomatis.\n\n` +
     `3. FLOW CONFIRMATION\n` +
     `   ${formatPressure(a.pressure)}\n\n` +
     `4. QUALITY CHECK\n` +
@@ -749,12 +754,7 @@ function formatScalpingAnalysis(a) {
     `   TPO/Market Profile: IB ${fmt(mp.initialBalanceLow)} - ${fmt(mp.initialBalanceHigh)} | POC ${fmt(mp.poc)}\n` +
     `   Supply/Demand: ${methods.supplyDemand?.type || 'NONE'} | Harmonic: ${methods.harmonic?.pattern || 'NONE'}\n` +
     `   Elliott: ${methods.elliott?.phase || 'N/A'} | EMA MTF: ${ema.H1?.direction || 'N/A'} / ${ema.M5?.direction || 'N/A'}\n\n` +
-    `   MA family: ${maFamily.direction || 'N/A'} | 50/200: ${maStructure.cross || 'N/A'} | Ribbon 8-13-21-34-55: ${maRibbon.alignment || 'N/A'}\n\n` +
-    `🛑 STOP LOSS: ${fmt(a.sl)} (–${a.slPips} pips)\n` +
-    `✅ TAKE PROFIT 1: ${fmt(a.tp1)} (${directionSign}${a.tp1Pips} pips, RR 1:1.5)\n` +
-    `✅ TAKE PROFIT 2: ${fmt(a.tp2)} (${directionSign}${a.tp2Pips} pips, RR 1:2.5)\n` +
-    `⏳ VALID SELAMA: 15-20 menit sejak sinyal dikirim\n` +
-    `📝 CATATAN: time stop bila harga belum bergerak sesuai arah setelah 15-20 menit. Hindari 15 menit sebelum/sesudah news high-impact; kalender news belum terhubung otomatis.`;
+    `   MA family: ${maFamily.direction || 'N/A'} | 50/200: ${maStructure.cross || 'N/A'} | Ribbon 8-13-21-34-55: ${maRibbon.alignment || 'N/A'}`;
 }
 
 function formatPressure(pressure) {
