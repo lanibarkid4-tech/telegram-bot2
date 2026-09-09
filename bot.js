@@ -255,6 +255,7 @@ async function getPressureWithFallback(candleList) {
 // ======================================================
 const userState = {}; // { chatId: { step, tf, mode } }
 const signalSubscribers = new Set();
+const lastAutoSignal = new Map();
 let signalTimer = null;
 
 function setState(chatId, state) { userState[chatId] = { ...userState[chatId], ...state }; }
@@ -264,6 +265,11 @@ function clearState(chatId) { delete userState[chatId]; }
 async function sendScalpingSignal(chatId) {
   try {
     const analysis = await fullAnalysis('5m', 'scalping');
+    const signalKey = analysis.signalQuality?.valid
+      ? [analysis.direction, analysis.zoneType, analysis.entry, analysis.sl, analysis.tp1].join('|')
+      : null;
+    if (signalKey && lastAutoSignal.get(chatId) === signalKey) return;
+    if (signalKey) lastAutoSignal.set(chatId, signalKey);
     const text = formatScalpingAnalysis(analysis);
     await bot.sendMessage(chatId, text.length <= 4000 ? text : text.slice(0, 3990));
   } catch (e) {
@@ -568,15 +574,16 @@ async function fullAnalysis(execTF, mode) {
     : (methodDirection === 'BUY' || methodDirection === 'SELL' ? methodDirection : 'NONE');
   // 5. Entry, SL, TP
   let entry, sl, tp1, tp2, slPips, tp1Pips, tp2Pips;
-  const scalpDistance = 0.50;
+  const scalpBuffer = Math.max(m5Atr * 0.25, 0.20);
   const newsBlocked = mode === 'scalping' && process.env.HIGH_IMPACT_NEWS === 'true';
   const methodSignalAvailable = confluenceAnalysisResult.methodAgreement && confluenceAnalysisResult.methodAgreement.total > 0;
   if (zoneInfo) {
     entry = zoneInfo.midpoint || zoneInfo.price;
     if (mode === 'scalping') {
-      sl = direction === 'BUY' ? entry - scalpDistance : entry + scalpDistance;
-      tp1 = direction === 'BUY' ? entry + scalpDistance : entry - scalpDistance;
-      tp2 = direction === 'BUY' ? entry + scalpDistance * 1.5 : entry - scalpDistance * 1.5;
+      sl = direction === 'BUY' ? zoneInfo.low - scalpBuffer : zoneInfo.high + scalpBuffer;
+      const risk = Math.abs(entry - sl);
+      tp1 = direction === 'BUY' ? entry + risk * 1.5 : entry - risk * 1.5;
+      tp2 = direction === 'BUY' ? entry + risk * 2.5 : entry - risk * 2.5;
     } else if (direction === 'BUY') {
       sl = zoneInfo.low - 0.50;
       const slDist = entry - sl;
@@ -592,9 +599,10 @@ async function fullAnalysis(execTF, mode) {
     // Fallback: pakai current price
     entry = lastLtf;
     if (mode === 'scalping') {
-      sl = direction === 'BUY' ? entry - scalpDistance : entry + scalpDistance;
-      tp1 = direction === 'BUY' ? entry + scalpDistance : entry - scalpDistance;
-      tp2 = direction === 'BUY' ? entry + scalpDistance * 1.5 : entry - scalpDistance * 1.5;
+      sl = direction === 'BUY' ? entry - scalpBuffer : entry + scalpBuffer;
+      const risk = Math.abs(entry - sl);
+      tp1 = direction === 'BUY' ? entry + risk * 1.5 : entry - risk * 1.5;
+      tp2 = direction === 'BUY' ? entry + risk * 2.5 : entry - risk * 2.5;
     } else if (direction === 'BUY') {
       sl = entry - 0.50;
       tp1 = entry + 0.75;
@@ -742,9 +750,9 @@ function formatScalpingAnalysis(a) {
     `   Supply/Demand: ${methods.supplyDemand?.type || 'NONE'} | Harmonic: ${methods.harmonic?.pattern || 'NONE'}\n` +
     `   Elliott: ${methods.elliott?.phase || 'N/A'} | EMA MTF: ${ema.H1?.direction || 'N/A'} / ${ema.M5?.direction || 'N/A'}\n\n` +
     `   MA family: ${maFamily.direction || 'N/A'} | 50/200: ${maStructure.cross || 'N/A'} | Ribbon 8-13-21-34-55: ${maRibbon.alignment || 'N/A'}\n\n` +
-    `🛑 STOP LOSS: ${fmt(a.sl)} (–50 pips)\n` +
-    `✅ TAKE PROFIT 1: ${fmt(a.tp1)} (${directionSign}50 pips, RR 1:1)\n` +
-    `✅ TAKE PROFIT 2: ${fmt(a.tp2)} (${directionSign}75 pips, RR 1:1.5)\n` +
+    `🛑 STOP LOSS: ${fmt(a.sl)} (–${a.slPips} pips)\n` +
+    `✅ TAKE PROFIT 1: ${fmt(a.tp1)} (${directionSign}${a.tp1Pips} pips, RR 1:1.5)\n` +
+    `✅ TAKE PROFIT 2: ${fmt(a.tp2)} (${directionSign}${a.tp2Pips} pips, RR 1:2.5)\n` +
     `⏳ VALID SELAMA: 15-20 menit sejak sinyal dikirim\n` +
     `📝 CATATAN: time stop bila harga belum bergerak sesuai arah setelah 15-20 menit. Hindari 15 menit sebelum/sesudah news high-impact; kalender news belum terhubung otomatis.`;
 }
