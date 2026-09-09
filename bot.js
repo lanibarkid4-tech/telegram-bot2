@@ -28,6 +28,7 @@ if (!TOKEN) {
 }
 
 const TD_KEY = process.env.TWELVE_DATA_API_KEY;
+const MIN_SIGNAL_PROBABILITY = 50;
 console.log('========================================');
 console.log('🏆 XAUUSD ICT/SMC ANALYST');
 console.log('📡 Data: Twelve Data (XAU/USD spot)');
@@ -628,7 +629,7 @@ async function fullAnalysis(execTF, mode) {
     pressureAligned,
     forcedNearPrice,
     valid: mode !== 'scalping' || (
-      direction !== 'NONE' && methodConfidence >= 55 && zoneScore >= 60 && !forcedNearPrice && pressureAligned
+      direction !== 'NONE' && methodConfidence >= MIN_SIGNAL_PROBABILITY && zoneScore >= 60 && !forcedNearPrice && pressureAligned
     )
   };
   const scalpNoTrade = mode === 'scalping' && (!zoneInfo || newsBlocked || !methodSignalAvailable || !['BUY', 'SELL'].includes(methodDirection) || !signalQuality.valid);
