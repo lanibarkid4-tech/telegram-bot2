@@ -531,7 +531,9 @@ async function fullAnalysis(execTF, mode) {
     candles: mid,
     timeframes: { H1: htf, M5: mid, LTF: ltf },
     ta,
-    pressure: normalizedPressure
+    pressure: normalizedPressure,
+    ict: ictA,
+    session: getSession()
   });
 
   const methodDirection = confluenceAnalysisResult.methodAgreement.direction;
@@ -770,7 +772,7 @@ function formatPressure(pressure) {
 
 function formatMethodReports(reports) {
   if (!reports || !reports.length) return 'Belum tersedia';
-  return reports.slice(0, 20).map((report, index) => `${String(index + 1).padStart(2, '0')}. ${report.label}: ${report.signal} (${report.probability}%)`).join('\n');
+  return reports.slice(0, 20).map((report, index) => `${String(index + 1).padStart(2, '0')}. ${report.label}: ${report.signal} (${report.probability}%)${report.note ? ` — ${report.note}` : ''}`).join('\n');
 }
 
 function formatMethodAgreement(agreement) {

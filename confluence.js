@@ -586,28 +586,77 @@ function methodAgreement(methods) {
 }
 
 function methodReports(methods) {
-  const labels = {
-    atr: 'ATR', adx: 'ADX', stochastic: 'Stochastic', cci: 'CCI', roc: 'ROC', momentum: 'Momentum',
-    donchian: 'Donchian', keltner: 'Keltner', pivotPoints: 'Pivot Points', fibonacci: 'Fibonacci',
-    candlePattern: 'Candlestick Pattern', volumeSpike: 'Volume Spike', obv: 'OBV', rangeExpansion: 'Range Expansion',
-    volatilityRegime: 'Volatility Regime', trendSlope: 'Trend Slope', supportResistance: 'Support/Resistance',
-    meanReversion: 'Mean Reversion', seasonality: 'Seasonality', priceAction: 'Price Action',
-    movingAverageFamily: 'MA Family', movingAverageStructure: 'MA 50/200 Cross', movingAverageRibbon: 'MA Ribbon'
-  };
-  return Object.entries(labels).map(([key, label]) => {
-    const method = methods[key] || {};
+  return Object.entries(methods).map(([key, method]) => {
     const direction = ['BUY', 'SELL', 'NEUTRAL'].includes(method.direction) ? method.direction : 'N/A';
     let probability = direction === 'N/A' ? 0 : direction === 'NEUTRAL' ? 50 : 55;
     if (method.pattern && method.pattern !== 'NONE' && method.pattern !== 'INDECISION') probability += 8;
     if (method.cross && method.cross !== 'NONE' && method.cross !== 'INSUFFICIENT_DATA') probability += 10;
     if (method.alignment && method.alignment !== 'MIXED' && method.alignment !== 'INCOMPLETE') probability += 8;
     if (direction !== 'NEUTRAL' && Number.isFinite(method.value)) probability += Math.min(7, Math.round(Math.abs(method.value) > 1 ? 5 : Math.abs(method.value) * 2));
-    return { key, label, signal: direction, probability: Math.min(85, probability) };
+    return { key, label: method.label || key, signal: direction, probability: Math.min(85, probability), note: method.note || '' };
   });
 }
 
-function analyzeConfluence({ candles, timeframes, ta, pressure }) {
+function requestedMethodReports({ candles, timeframes, methods, ict, pressure, session }) {
+  const last = candles[candles.length - 1];
+  const price = Number(last.close);
+  const h1 = timeframes.H1 || candles;
+  const h1Last = h1[h1.length - 1];
+  const profile = volumeProfile(candles);
+  const bands = vwapBands(candles);
+  const structure = pivotStructure(candles);
+  const supply = supplyDemand(candles);
+  const ma = methods.movingAverageFamily || {};
+  const maStructure = methods.movingAverageStructure || {};
+  const maRibbon = methods.movingAverageRibbon || {};
+  const report = (key, label, signal, probability, note = '') => ({ key, label, signal, probability, note });
+  const directional = signal => signal === 'BUY' || signal === 'SELL' ? signal : 'NEUTRAL';
+  const ob = ict?.orderBlocks?.[0];
+  const fvg = ict?.fvgs?.[0];
+  const sweep = ict?.sweeps?.[0];
+  const bos = structure.bos?.direction || structure.choch?.direction;
+  const fib = methods.fibonacci || {};
+  const previousRange = candles.slice(-Math.min(288, candles.length - 1), -1);
+  const pdh = previousRange.length ? Math.max(...previousRange.map(c => Number(c.high))) : null;
+  const pdl = previousRange.length ? Math.min(...previousRange.map(c => Number(c.low))) : null;
+  const round = Math.round(price / 10) * 10;
+  const ichimokuHigh = Math.max(...candles.slice(-52).map(c => Number(c.high)));
+  const ichimokuLow = Math.min(...candles.slice(-52).map(c => Number(c.low)));
+  const kijun = (Math.max(...candles.slice(-26).map(c => Number(c.high))) + Math.min(...candles.slice(-26).map(c => Number(c.low)))) / 2;
+  const cloudMid = (ichimokuHigh + ichimokuLow) / 2;
+  const pdhSignal = price > pdh ? 'BUY' : price < pdl ? 'SELL' : 'NEUTRAL';
+  const roundSignal = price > round ? 'BUY' : price < round ? 'SELL' : 'NEUTRAL';
+  const ichimokuSignal = price > cloudMid && price > kijun ? 'BUY' : price < cloudMid && price < kijun ? 'SELL' : 'NEUTRAL';
+  return [
+    report('orderBlock', 'Order Block (OB)', ob ? (ob.type.includes('BULLISH') ? 'BUY' : 'SELL') : 'NEUTRAL', ob ? 65 : 50, ob ? 'OB terakhir tersedia' : 'OB tidak ditemukan'),
+    report('fvg', 'Fair Value Gap / Imbalance', fvg ? (fvg.type.includes('BULLISH') ? 'BUY' : 'SELL') : 'NEUTRAL', fvg ? 62 : 50, fvg ? 'FVG 50% digunakan sebagai area retrace' : 'FVG tidak ditemukan'),
+    report('liquiditySweep', 'Liquidity Sweep / Stop Hunt', sweep?.direction || 'NEUTRAL', sweep ? 68 : 50, sweep ? 'sweep terdeteksi' : 'sweep belum terdeteksi'),
+    report('structureShift', 'MSS / BOS', directional(bos), bos ? 68 : 50, structure.trend || 'RANGING'),
+    report('vwapBands', 'VWAP + Standard Deviation Bands', bands.ok ? (price < bands.lower ? 'BUY' : price > bands.upper ? 'SELL' : 'NEUTRAL') : 'N/A', bands.ok ? 60 : 0, bands.ok ? 'session candle VWAP proxy' : 'data tidak cukup'),
+    report('volumeProfile', 'Volume Profile POC / VAH / VAL', profile.ok ? (price < profile.valueAreaLow ? 'BUY' : price > profile.valueAreaHigh ? 'SELL' : 'NEUTRAL') : 'N/A', profile.ok ? 58 : 0, profile.ok ? `VPOC ${profile.vpoc.toFixed(2)}` : 'data tidak cukup'),
+    report('supplyDemand', 'Supply & Demand Zones', supply.type.includes('DEMAND') ? 'BUY' : supply.type.includes('SUPPLY') ? 'SELL' : 'NEUTRAL', supply.type === 'NONE' ? 50 : 62, supply.type),
+    report('fibonacciOTE', 'Fibonacci Institutional OTE', price > (fib.level618 || price) ? 'BUY' : price < (fib.level618 || price) ? 'SELL' : 'NEUTRAL', 57, '61.8% swing proxy'),
+    report('killzone', 'Session Killzone', session?.inKillzone ? (methods.trendSlope?.direction || 'NEUTRAL') : 'NEUTRAL', session?.inKillzone ? 60 : 50, session?.name || 'session'),
+    report('dxy', 'DXY Correlation', 'N/A', 0, 'feed DXY belum terhubung'),
+    report('cot', 'COT Report', 'N/A', 0, 'feed CFTC mingguan belum terhubung'),
+    report('optionsGamma', 'Options Gamma / Max Pain', 'N/A', 0, 'feed options flow belum terhubung'),
+    report('footprint', 'Footprint / Order Flow Delta', pressure?.net > 0 ? 'BUY' : pressure?.net < 0 ? 'SELL' : 'NEUTRAL', pressure?.source === 'dukascopy-proxy' ? 55 : 50, pressure?.note || 'proxy, bukan true footprint'),
+    report('anchoredVWAP', 'Anchored VWAP', bands.ok ? (price < bands.vwap ? 'BUY' : price > bands.vwap ? 'SELL' : 'NEUTRAL') : 'N/A', bands.ok ? 56 : 0, 'anchor dari window M5 terbaru'),
+    report('previousHighLow', 'PDH / PDL & PWH / PWL', pdhSignal, 58, 'window high/low proxy'),
+    report('roundNumber', 'Round Number / Psychological Level', roundSignal, 54, `level ${round.toFixed(0)}`),
+    report('ichimoku', 'Ichimoku Kumo 9/26/52', ichimokuSignal, 60, `Kijun ${kijun.toFixed(2)}`),
+    report('movingAverage', 'Moving Average Confluence', ma.direction || 'NEUTRAL', ma.direction ? 65 : 50, `EMA 21/50/200 + ribbon ${maRibbon.alignment || 'N/A'}`),
+    report('atrZone', 'ATR-based Volatility Zone', methods.atr?.value ? 'NEUTRAL' : 'N/A', methods.atr?.value ? 55 : 0, methods.atr?.value ? `ATR ${methods.atr.value.toFixed(2)}` : 'ATR tidak tersedia'),
+    report('newsFilter', 'News / Economic Calendar Filter', process.env.HIGH_IMPACT_NEWS === 'true' ? 'NEUTRAL' : 'N/A', process.env.HIGH_IMPACT_NEWS === 'true' ? 100 : 0, process.env.HIGH_IMPACT_NEWS === 'true' ? 'blocked oleh HIGH_IMPACT_NEWS' : 'calendar otomatis belum terhubung')
+  ];
+}
+
+function analyzeConfluence({ candles, timeframes, ta, pressure, ict, session }) {
   const additional = additionalMethods(candles);
+  const requested = requestedMethodReports({ candles, timeframes, methods: additional, ict, pressure, session });
+  const available = requested.filter(item => item.signal === 'BUY' || item.signal === 'SELL');
+  const buy = available.filter(item => item.signal === 'BUY').length;
+  const sell = available.filter(item => item.signal === 'SELL').length;
   return {
     wyckoff: wyckoff(candles),
     volumeProfile: volumeProfile(candles),
@@ -620,8 +669,8 @@ function analyzeConfluence({ candles, timeframes, ta, pressure }) {
     macro: { status: 'UNAVAILABLE', note: 'DXY, US10Y, dan real yield belum terhubung' },
     pressure: pressure || null,
     additionalMethods: additional,
-    methodAgreement: methodAgreement(additional),
-    methodReports: methodReports(additional),
+    methodAgreement: { buy, sell, total: available.length, direction: buy > sell ? 'BUY' : sell > buy ? 'SELL' : 'MIXED', confidence: available.length ? Math.round(Math.max(buy, sell) / available.length * 100) : 0 },
+    methodReports: requested,
     pineFusion: pivotStructure(candles),
     ta: ta || null
   };
