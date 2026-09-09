@@ -716,6 +716,7 @@ function formatScalpingAnalysis(a) {
       `   VWAP: ${fmt(vwap.vwap)} | VPOC: ${fmt(vp.vpoc)}\n` +
       `   20-METHOD AGREEMENT: ${formatMethodAgreement(methods.methodAgreement)}\n` +
       `   MA: ${maFamily.direction || 'N/A'} | Cross: ${maStructure.cross || 'N/A'} | Ribbon: ${maRibbon.alignment || 'N/A'}\n` +
+      `\nINDIVIDUAL METHOD SIGNALS (technical estimate)\n${formatMethodReports(methods.methodReports)}\n` +
       `⏳ Validasi ulang dalam 5 menit.\n` +
       `📝 CATATAN: scalping tidak boleh dipaksakan; cek kalender news high-impact dan spread secara manual.`;
   }
@@ -741,6 +742,7 @@ function formatScalpingAnalysis(a) {
     `   Zone ${a.signalQuality?.zoneScore || 0}/100 | Method ${a.signalQuality?.methodConfidence || 0}% | Pressure ${a.signalQuality?.pressureAligned ? 'ALIGNED' : 'WAIT'}\n\n` +
     `5. MULTI-INDICATOR CHECK\n` +
     `   20-method agreement: ${formatMethodAgreement(methods.methodAgreement)}\n` +
+    `   INDIVIDUAL METHOD SIGNALS (technical estimate)\n${formatMethodReports(methods.methodReports)}\n` +
     `   Wyckoff: ${wyckoff.phase || 'N/A'}${wyckoff.event && wyckoff.event !== 'NONE' ? ` / ${wyckoff.event}` : ''}\n` +
     `   VPOC: ${fmt(vp.vpoc)} | Value Area: ${fmt(vp.valueAreaLow)} - ${fmt(vp.valueAreaHigh)}\n` +
     `   VWAP: ${fmt(vwap.vwap)} | Bands: ${fmt(vwap.lower)} - ${fmt(vwap.upper)}\n` +
@@ -764,6 +766,11 @@ function formatPressure(pressure) {
   const source = p.source || 'unavailable';
   const note = p.note ? ` — ${p.note}` : '';
   return `Bullish: ${bullish} | Bearish: ${bearish} | Net: ${netLabel}\n   Source: ${source}${note}`;
+}
+
+function formatMethodReports(reports) {
+  if (!reports || !reports.length) return 'Belum tersedia';
+  return reports.map(report => `   ${report.label}: ${report.signal} (${report.probability}%)`).join('\n');
 }
 
 function formatMethodAgreement(agreement) {

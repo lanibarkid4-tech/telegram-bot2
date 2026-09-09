@@ -585,6 +585,27 @@ function methodAgreement(methods) {
   return { buy, sell, total, direction: buy > sell ? 'BUY' : sell > buy ? 'SELL' : 'MIXED', confidence: total ? Math.round(Math.max(buy, sell) / total * 100) : 0 };
 }
 
+function methodReports(methods) {
+  const labels = {
+    atr: 'ATR', adx: 'ADX', stochastic: 'Stochastic', cci: 'CCI', roc: 'ROC', momentum: 'Momentum',
+    donchian: 'Donchian', keltner: 'Keltner', pivotPoints: 'Pivot Points', fibonacci: 'Fibonacci',
+    candlePattern: 'Candlestick Pattern', volumeSpike: 'Volume Spike', obv: 'OBV', rangeExpansion: 'Range Expansion',
+    volatilityRegime: 'Volatility Regime', trendSlope: 'Trend Slope', supportResistance: 'Support/Resistance',
+    meanReversion: 'Mean Reversion', seasonality: 'Seasonality', priceAction: 'Price Action',
+    movingAverageFamily: 'MA Family', movingAverageStructure: 'MA 50/200 Cross', movingAverageRibbon: 'MA Ribbon'
+  };
+  return Object.entries(labels).map(([key, label]) => {
+    const method = methods[key] || {};
+    const direction = ['BUY', 'SELL', 'NEUTRAL'].includes(method.direction) ? method.direction : 'N/A';
+    let probability = direction === 'N/A' ? 0 : direction === 'NEUTRAL' ? 50 : 55;
+    if (method.pattern && method.pattern !== 'NONE' && method.pattern !== 'INDECISION') probability += 8;
+    if (method.cross && method.cross !== 'NONE' && method.cross !== 'INSUFFICIENT_DATA') probability += 10;
+    if (method.alignment && method.alignment !== 'MIXED' && method.alignment !== 'INCOMPLETE') probability += 8;
+    if (direction !== 'NEUTRAL' && Number.isFinite(method.value)) probability += Math.min(7, Math.round(Math.abs(method.value) > 1 ? 5 : Math.abs(method.value) * 2));
+    return { key, label, signal: direction, probability: Math.min(85, probability) };
+  });
+}
+
 function analyzeConfluence({ candles, timeframes, ta, pressure }) {
   const additional = additionalMethods(candles);
   return {
@@ -600,6 +621,7 @@ function analyzeConfluence({ candles, timeframes, ta, pressure }) {
     pressure: pressure || null,
     additionalMethods: additional,
     methodAgreement: methodAgreement(additional),
+    methodReports: methodReports(additional),
     pineFusion: pivotStructure(candles),
     ta: ta || null
   };
