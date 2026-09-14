@@ -13,13 +13,16 @@
 require('dotenv').config();
 
 const TelegramBot = require('node-telegram-bot-api');
-const candles = require('./candles');
-const xauusdTA = require('./xauusd-ta');
 const ict = require('./ict-structures');
 const orderflow = require('./orderflow');
 const dukascopy = require('./dukascopy');
-const confluenceAnalysis = require('./confluence');
+const conf = require('./confluence');
 const { RateLimiter, Logger, GracefulShutdown } = require('./utils');
+const redeployFresh = require('./redeploy-fresh');
+const deployScript = async () => {
+  const { execSync } = await import('child_process');
+  execSync('node redeploy-fresh.js', { stdio: 'inherit' });
+};
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!TOKEN) {
@@ -28,7 +31,8 @@ if (!TOKEN) {
 }
 
 const TD_KEY = process.env.TWELVE_DATA_API_KEY;
-const MIN_SIGNAL_PROBABILITY = 50;
+const MIN_SIGNAL_PROBABILITY = 60;
+const MAX_DAILY_AUTO_SIGNALS = 10;
 console.log('========================================');
 console.log('🏆 XAUUSD ICT/SMC ANALYST');
 console.log('📡 Data: Twelve Data (XAU/USD spot)');
@@ -110,7 +114,7 @@ function getIndicatorZoneCandidates(ta, bias, price) {
   const levels = [];
   const supportNearest = Number(ta && ta.supportNearest);
   const resistanceNearest = Number(ta && ta.resistanceNearest);
-  const zoneWidth = Math.max(Number(ta && ta.atr || 0) * 0.25, 0.15);
+  const zoneWidth = 0.10;
 
   if (bias === 'BULLISH') {
     if (Number.isFinite(supportNearest) && supportNearest < price) {
@@ -150,7 +154,7 @@ function getM5Atr(candles, period = 14) {
 }
 
 function getNearbyScalpZone(price, direction, m5Atr) {
-  const width = Math.max(m5Atr * 0.35, 0.15);
+  const width = 0.10;
   return {
     type: 'M5_NEAR_PRICE_PULLBACK',
     direction,
@@ -210,7 +214,7 @@ function getTwentyMethodZone(analysis, direction, price, atrValue) {
   if (!directional.length) return null;
   const nearest = directional.sort((a, b) => Math.abs(a[1] - price) - Math.abs(b[1] - price)).slice(0, 4);
   const midpoint = nearest.reduce((sum, [, level]) => sum + Number(level), 0) / nearest.length;
-  const width = Math.max(Number(atrValue || 0) * 0.2, 0.15);
+  const width = 0.10;
   return {
     type: '20_METHOD_CLUSTER',
     direction,
@@ -257,32 +261,72 @@ async function getPressureWithFallback(candleList) {
 const userState = {}; // { chatId: { step, tf, mode } }
 const signalSubscribers = new Set();
 const lastAutoSignal = new Map();
+const dailyAutoSignalCount = new Map();
 let signalTimer = null;
+
+function getTodayKey() {
+  const now = new Date();
+  return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-${String(now.getUTCDate()).padStart(2, '0')}`;
+}
+
+function getDailyCount(chatId) {
+  const count = dailyAutoSignalCount.get(`${getTodayKey()}|${chatId}`);
+  return Number.isFinite(count) ? count : 0;
+}
+
+function incrementDailyCount(chatId) {
+  const key = `${getTodayKey()}|${chatId}`;
+  dailyAutoSignalCount.set(key, (dailyAutoSignalCount.get(key) || 0) + 1);
+}
+
+function getTodayKey() {
+  const now = new Date();
+  return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-${String(now.getUTCDate()).padStart(2, '0')}`;
+}
+
+function getDailyCount(chatId) {
+  const count = dailyAutoSignalCount.get(`${getTodayKey()}|${chatId}`);
+  return Number.isFinite(count) ? count : 0;
+}
+
+function incrementDailyCount(chatId) {
+  const key = `${getTodayKey()}|${chatId}`;
+  dailyAutoSignalCount.set(key, (dailyAutoSignalCount.get(key) || 0) + 1);
+}
 
 function setState(chatId, state) { userState[chatId] = { ...userState[chatId], ...state }; }
 function getState(chatId) { return userState[chatId] || {}; }
 function clearState(chatId) { delete userState[chatId]; }
 
 async function sendScalpingSignal(chatId) {
-  try {
-    const analysis = await fullAnalysis('5m', 'scalping');
-    const signalKey = analysis.signalQuality?.valid
-      ? [analysis.direction, analysis.zoneType, analysis.entry, analysis.sl, analysis.tp1].join('|')
-      : null;
-    if (signalKey && lastAutoSignal.get(chatId) === signalKey) return;
-    if (signalKey) lastAutoSignal.set(chatId, signalKey);
-    const text = formatScalpingAnalysis(analysis);
-    await bot.sendMessage(chatId, text.length <= 4000 ? text : text.slice(0, 3990));
-  } catch (e) {
-    logger.error(`auto signal ${chatId}: ${e.message}`);
+    try {
+      const analysis = await fullAnalysis('5m', 'scalping');
+      if (!analysis.signalQuality?.valid) return;
+      if (analysis.scalpNoTrade) return; // skip NO TRADE messages
+      if (analysis.signalQuality?.methodConfidence < MIN_SIGNAL_PROBABILITY) return;
+      const todayKey = getTodayKey();
+      const todayCount = getDailyCount(chatId);
+      if (todayCount >= MAX_DAILY_AUTO_SIGNALS) {
+        logger.info(`auto signal ${chatId}: daily limit reached (${todayCount})`);
+        return;
+      }
+      const signalKey = [analysis.direction, analysis.zoneType, analysis.entry, analysis.sl, analysis.tp1].join('|');
+      if (lastAutoSignal.get(chatId) === signalKey) return;
+      lastAutoSignal.set(chatId, signalKey);
+      const text = formatScalpingAnalysis(analysis);
+      await bot.sendMessage(chatId, text.length <= 4000 ? text : text.slice(0, 3990));
+      incrementDailyCount(chatId);
+      logger.info(`auto signal ${chatId}: sent, daily count ${todayCount + 1}/${MAX_DAILY_AUTO_SIGNALS}`);
+    } catch (e) {
+      logger.error(`auto signal ${chatId}: ${e.message}`);
+    }
   }
-}
 
 function startSignalTimer() {
   if (signalTimer) return;
   signalTimer = setInterval(async () => {
     for (const chatId of signalSubscribers) await sendScalpingSignal(chatId);
-  }, 60 * 1000);
+  }, 5 * 60 * 1000);
 }
 
 function stopSignalTimerIfUnused() {
@@ -711,11 +755,16 @@ function formatScalpingAnalysis(a) {
         : 'belum ditemukan zona entry M5 yang valid searah bias H1';
     return `🚫 NO TRADE — XAUUSD, ${reason}.\n` +
       `💰 HARGA SAAT INI: $${fmt(a.realtimePrice || a.lastLtf)}\n\n` +
-      `1. 20-METHOD M5 DIRECTION\n   ${methodDirection}; H1 context: ${htfContext}.\n\n` +
-      `2. ENTRY ZONE M5\n   Belum valid; tunggu zona berdasarkan level M5.\n\n` +
-      `3. FLOW CONFIRMATION\n   ${formatPressure(a.pressure)}\n` +
-      `4. QUALITY CHECK\n   Zone ${a.signalQuality?.zoneScore || 0}/100 | Method ${a.signalQuality?.methodConfidence || 0}% | Pressure ${a.signalQuality?.pressureAligned ? 'ALIGNED' : 'WAIT'}\n` +
-      `5. MARKET CONTEXT\n   Wyckoff: ${wyckoff.phase || 'N/A'} / ${wyckoff.event || 'NONE'}\n` +
+      `1. 20-METHOD M5 DIRECTION\n` +
+      `   ${methodDirection}; H1 context: ${htfContext}.\n\n` +
+      `2. ENTRY ZONE M5\n` +
+      `   Belum valid; tunggu zona berdasarkan level M5.\n\n` +
+      `3. FLOW CONFIRMATION\n` +
+      `   ${formatPressure(a.pressure)}\n` +
+      `4. QUALITY CHECK\n` +
+      `   Zone ${a.signalQuality?.zoneScore || 0}/100 | Method ${a.signalQuality?.methodConfidence || 0}% | Pressure ${a.signalQuality?.pressureAligned ? 'ALIGNED' : 'WAIT'}\n` +
+      `5. MARKET CONTEXT\n` +
+      `   Wyckoff: ${wyckoff.phase || 'N/A'} / ${wyckoff.event || 'NONE'}\n` +
       `   VWAP: ${fmt(vwap.vwap)} | VPOC: ${fmt(vp.vpoc)}\n` +
       `   20-METHOD AGREEMENT: ${formatMethodAgreement(methods.methodAgreement)}\n` +
       `   MA: ${maFamily.direction || 'N/A'} | Cross: ${maStructure.cross || 'N/A'} | Ribbon: ${maRibbon.alignment || 'N/A'}\n` +
@@ -753,10 +802,10 @@ function formatScalpingAnalysis(a) {
     `   INDIVIDUAL METHOD SIGNALS (technical estimate)\n${formatMethodReports(methods.methodReports)}\n` +
     `   Wyckoff: ${wyckoff.phase || 'N/A'}${wyckoff.event && wyckoff.event !== 'NONE' ? ` / ${wyckoff.event}` : ''}\n` +
     `   VPOC: ${fmt(vp.vpoc)} | Value Area: ${fmt(vp.valueAreaLow)} - ${fmt(vp.valueAreaHigh)}\n` +
-    `   VWAP: ${fmt(vwap.vwap)} | Bands: ${fmt(vwap.lower)} - ${fmt(vwap.upper)}\n` +
-    `   TPO/Market Profile: IB ${fmt(mp.initialBalanceLow)} - ${fmt(mp.initialBalanceHigh)} | POC ${fmt(mp.poc)}\n` +
-    `   Supply/Demand: ${methods.supplyDemand?.type || 'NONE'} | Harmonic: ${methods.harmonic?.pattern || 'NONE'}\n` +
-    `   Elliott: ${methods.elliott?.phase || 'N/A'} | EMA MTF: ${ema.H1?.direction || 'N/A'} / ${ema.M5?.direction || 'N/A'}\n\n` +
+    `   VWAP: ${fmt(vwap.vwap)} | Bands: ${fmt(vwap.lower)} - ${fmt(vwap.upper)}` +
+    `   TPO/Market Profile: IB ${fmt(mp.initialBalanceLow)} - ${fmt(mp.initialBalanceHigh)} | POC ${fmt(mp.poc)}` +
+    `   Supply/Demand: ${methods.supplyDemand?.type || 'NONE'} | Harmonic: ${methods.harmonic?.pattern || 'NONE'}` +
+    `   Elliott: ${methods.elliott?.phase || 'N/A'} | EMA MTF: ${ema.H1?.direction || 'N/A'} / ${ema.M5?.direction || 'N/A'}` +
     `   MA family: ${maFamily.direction || 'N/A'} | 50/200: ${maStructure.cross || 'N/A'} | Ribbon 8-13-21-34-55: ${maRibbon.alignment || 'N/A'}`;
 }
 
@@ -911,7 +960,7 @@ Bot analisa teknikal XAUUSD berbasis ICT/SMC + 5 konfluensi.
 /xauusd — Mulai analisa (pilih TF & mode)
 /help — Bantuan
 /status — Status bot & session
-/signal_on — Signal scalping M5 setiap 1 menit
+/signal_on — Signal scalping M5 tiap 5 menit (hanya kirim kalau valid)
 /signal_off — Hentikan signal otomatis
 /cancel — Batalkan analisa
 
@@ -935,7 +984,7 @@ bot.onText(/^\/signal_on$/, async (m) => {
   const chatId = m.chat.id;
   signalSubscribers.add(chatId);
   startSignalTimer();
-  await bot.sendMessage(chatId, '✅ Signal scalping M5 otomatis aktif setiap 1 menit. Signal pertama dikirim sekarang.');
+  await bot.sendMessage(chatId, '✅ Signal scalping M5 otomatis aktif tiap 5 menit. Hanya kirim kalau ada sinyal valid (confidence ≥60%).');
   await sendScalpingSignal(chatId);
 });
 
@@ -1084,3 +1133,10 @@ bot.on('polling_error', (err) => {
     console.error('❌ Polling:', err.message);
   }
 });
+
+// Start automatic deployment only when explicitly enabled for this runtime.
+if (process.env.AUTO_DEPLOY === 'true' || process.env.RAILWAY_DEPLOY_ENABLED === 'true') {
+  deployScript().catch(console.error);
+} else {
+  console.log('ℹ️ Auto redeploy disabled for this bot runtime.');
+}
